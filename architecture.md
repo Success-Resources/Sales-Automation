@@ -2,6 +2,21 @@
 
 On-site MMI sales. A participant scans a QR code, pays in Stripe (full payment or an installment), and that payment is written into one central Google Sheet. This project is separate from the Zendesk agents. Maya, Quinn, and Rafa do not read or write these payments.
 
+## Overview
+
+```mermaid
+flowchart TD
+  qr[QR code at the MMI event] --> link[Stripe Payment Link]
+  link --> pay[Customer pays in full or by installment]
+  pay --> hook[Stripe sends a webhook]
+  hook --> svc[Sales service on Render]
+  svc --> name["Read the product name: event code, then the programme"]
+  name --> tab[Append one row on that event tab]
+  tab --> sheet[Google Sheet: SR Event Sales]
+```
+
+A product named `MMI2610ROT | Quantum Leap 2027` is a sale at Rotterdam MMI in October 2026. The row goes on the tab `MMI2610ROT`. The programme column says `Quantum Leap 2027`.
+
 ## What gets captured
 
 Each successful Stripe payment for a programme sold at an MMI event. The programmes are:
@@ -75,7 +90,7 @@ Columns, in this order:
 
 A refund updates the existing row to `refunded`. It does not add a second row.
 
-The first tab to create, for the Madrid September 2026 products above, is `MMI2609MAD`. Later cities are new tabs with the same header row. The service can create a missing tab the first time a payment for that code arrives.
+The test tab is Rotterdam, October 2026: `MMI2610ROT`. The sheet is [SR Event Sales](https://docs.google.com/spreadsheets/d/1VWqP7raa6taFi9JCSN8NUXpVooPBM_6xuEF_IEVK-0E/edit). Later cities are new tabs with the same header row. The service creates a missing tab the first time a payment for that code arrives.
 
 Create this sheet in the Success Resources Google account, not in a personal Drive. A service account (the same kind already used for registration sheets) needs Editor access on this one file.
 
