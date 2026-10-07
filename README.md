@@ -4,4 +4,4 @@ On-site MMI event sales. A participant scans a QR code, pays in Stripe, and the 
 
 This repository is only for sales automation. It is not the Zendesk agent service.
 
-The design is in [architecture.md](architecture.md). A printable copy is [architecture.pdf](architecture.pdf).
+The design is in [architecture.md](architecture.md).

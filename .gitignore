@@ -1,5 +1,6 @@
 .env
 __pycache__/
 *.pyc
+*.pdf
 service-account*.json
 credentials.json
