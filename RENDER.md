@@ -16,7 +16,7 @@ The sheet is [SR Event Sales](https://docs.google.com/spreadsheets/d/1VWqP7raa6t
 6. Open the JSON and copy the `client_email` value. It looks like `event-sales@....iam.gserviceaccount.com`.
 7. Open the SR Event Sales sheet → Share → paste that email → Editor → Send.
 
-When the service starts, it renames the first tab from `SR Event Sales` to `MMI2610ROT` (Rotterdam, October 2026).
+When a payment arrives for a city that does not have a tab yet, the service creates that tab. The Rotterdam tab is `MMI2610ROT`.
 
 ## 2. Create the Render service
 

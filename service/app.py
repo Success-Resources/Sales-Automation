@@ -23,7 +23,6 @@ from sheet import (
     is_speed_wealth,
     mark_refunded,
     paid_at,
-    prepare_tab,
     record_payment,
 )
 
@@ -227,27 +226,23 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
     )
 
 
-@app.on_event("startup")
-def _prepare_rotterdam_tab() -> None:
-    if not sheet_configured():
-        log.info("sheet not configured yet")
-        return
-    try:
-        prepare_tab(ROTTERDAM_TAB)
-        log.info("sheet tab ready %s", ROTTERDAM_TAB)
-    except Exception:
-        log.exception("could not prepare sheet tab %s", ROTTERDAM_TAB)
-
-
-@app.api_route("/", methods=["GET", "HEAD"])
-@app.get("/health")
-def health() -> dict:
+def _status() -> dict:
     return {
         "ok": True,
         "sheet_configured": sheet_configured(),
         "stripe_configured": _stripe_ready(),
         "rotterdam_tab": ROTTERDAM_TAB,
     }
+
+
+@app.get("/")
+def root() -> dict:
+    return _status()
+
+
+@app.get("/health")
+def health() -> dict:
+    return _status()
 
 
 @app.post("/stripe/webhook")
