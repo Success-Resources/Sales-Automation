@@ -44,7 +44,8 @@ _SECTIONS = (
     ("EWC", "enlightenedwarrior", "ewc", "990000", "FFFFFF"),
     ("QL", "quantumleap", "ql", "D9D9D9", "000000"),
 )
-_TITLES = {title for title, *_rest in _SECTIONS} | {"Other"}
+_TITLES = {title for title, *_rest in _SECTIONS} | {"Refunded", "Other"}
+_REFUNDED_FILL = "F4CCCC"
 
 
 def _rgb(value: str) -> dict:
@@ -132,18 +133,26 @@ def _section_for(programme: str) -> int | None:
     return None
 
 
+def _is_refunded(row: list[str]) -> bool:
+    return row[_STATUS].strip().lower() == "refunded"
+
+
 def _layout(payments: list[list[str]]) -> tuple[list[list[str]], list[tuple[int, int, str, str]]]:
     grouped: list[list[list[str]]] = [[] for _ in _SECTIONS]
+    refunded: list[list[str]] = []
     other: list[list[str]] = []
     for row in payments:
+        if _is_refunded(row):
+            refunded.append(row)
+            continue
         section = _section_for(row[1])
         if section is None:
             other.append(row)
         else:
             grouped[section].append(row)
 
-    sections = list(_SECTIONS)
-    buckets = grouped
+    sections = list(_SECTIONS) + [("Refunded", "", "", _REFUNDED_FILL, "000000")]
+    buckets = grouped + [refunded]
     if other:
         sections = sections + [("Other", "", "", "FFFFFF", "000000")]
         buckets = buckets + [other]
@@ -381,9 +390,12 @@ def mark_refunded(payment_intent: str) -> str:
     api = _api()
     for tab in _tabs(api):
         payments = _payment_rows(_values(api, tab))
-        for existing in payments:
+        for index, existing in enumerate(payments):
             if existing[_PAYMENT_ID] == payment_intent:
+                already = _is_refunded(existing)
                 existing[_STATUS] = "refunded"
+                if not already:
+                    payments.append(payments.pop(index))
                 organize_tab(api, tab, payments)
                 return "refunded"
     return "not_found"

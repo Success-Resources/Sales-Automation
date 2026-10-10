@@ -66,7 +66,7 @@ One spreadsheet, for example **SR Event Sales**.
 
 One tab per MMI event. The tab name is the event code from the left side of the Stripe name: `MMI2609MAD`, `MMI2609STO`, `MMI2610MAD`.
 
-Each tab is grouped by programme. Each group starts with a title row, then the column header row, then its payment rows. The titles are Speed Wealth Book, Never Work Again, GBI, TTT, EWC, and QL. Three empty rows separate the groups. A new payment is inserted into its own group, and the whole group stays highlighted: Speed Wealth Book light green, Never Work Again light purple, Guerrilla Business Intensive dark green, Train the Trainer orange, Enlightened Warrior Camp dark red, Quantum Leap gray.
+Each tab is grouped by programme. Each group starts with a title row, then the column header row, then its payment rows. The titles are Speed Wealth Book, Never Work Again, GBI, TTT, EWC, QL, and Refunded. Three empty rows separate the groups. A new payment is inserted into its own group, and the whole group stays highlighted: Speed Wealth Book light green, Never Work Again light purple, Guerrilla Business Intensive dark green, Train the Trainer orange, Enlightened Warrior Camp dark red, Quantum Leap gray, Refunded light red.
 
 Columns, in this order:
 
@@ -85,7 +85,7 @@ Columns, in this order:
 13. Invoice id (installments)
 14. Status (`succeeded`, `refunded`, `failed`)
 
-A refund updates the existing row to `refunded`. It does not add a second row.
+A refund moves that row out of its programme group and into the Refunded group. It does not add a second row.
 
 The test tab is Rotterdam, October 2026: `MMI2610ROT`. The sheet is [SR Event Sales](https://docs.google.com/spreadsheets/d/1VWqP7raa6taFi9JCSN8NUXpVooPBM_6xuEF_IEVK-0E/edit). Later cities are new tabs with the same header row. The service creates a missing tab the first time a payment for that code arrives.
 
@@ -138,7 +138,7 @@ No customer card numbers are stored. Stripe already holds the card. The sheet st
 2. In the Success Resources Google account, create the spreadsheet **SR Event Sales**. Add a tab `MMI2609MAD` with the header row above. Share it with the service account as Editor. Copy the sheet id from the URL.
 3. Build the sales service in this folder and deploy it as its own Render web service. Confirm `/health` responds.
 4. In Stripe, add a webhook endpoint pointing at `https://<that-service>/stripe/webhook`. Subscribe to `checkout.session.completed`, `invoice.paid`, and `charge.refunded`. Copy the signing secret into Render.
-5. Make one test payment in Stripe test mode for `MMI2609MAD | Never Work Again 2027`. One row should appear on the `MMI2609MAD` tab, with programme `Never Work Again 2027`. Pay a test installment and confirm a second row with the same subscription id. Refund the test payment and confirm the status changes to `refunded` instead of a new row.
+5. Make one test payment in Stripe test mode for `MMI2609MAD | Never Work Again 2027`. One row should appear on the `MMI2609MAD` tab, with programme `Never Work Again 2027`. Pay a test installment and confirm a second row with the same subscription id. Refund the test payment and confirm the row moves into the Refunded group instead of staying in the programme group.
 6. Switch the webhook and the QR codes to live mode before the event. Repeat the product setup for each new city (`MMI2609STO`, `MMI2610MAD`, and the next ones). A new city needs products, prices, QR codes, and a tab. It does not need a new service.
 
 ## What is deliberately out of this version

@@ -87,6 +87,6 @@ Stripe does not show **Add endpoint**. The control is **Create an event destinat
 4. The row should appear in the light green Speed Wealth Book group: programme `Speed Wealth Book`, payment plan `installment`, installment `1`, status `succeeded`, and a Payment ID.
 5. A later installment on the same plan is inserted into that same group, with the next installment number. The other programme groups stay where they are, with three empty rows between groups.
 
-A refund updates that row to `refunded` only after `charge.refunded` is added to the destination. Until then, a refund in Stripe does not change the sheet. A one-time full payment is written only after `checkout.session.completed` is added.
+A refund moves that row into the light red Refunded group, after QL, only after `charge.refunded` is added to the destination. Until then, a refund in Stripe does not change the sheet. A one-time full payment is written only after `checkout.session.completed` is added.
 
 A product whose name does not contain the event code, a space, a vertical bar, a space, and the programme is ignored. Stripe still gets a success response, and nothing is written to the sheet.
