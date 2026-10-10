@@ -20,10 +20,10 @@ from sheet import (
     ROTTERDAM_TAB,
     amount_major,
     configured as sheet_configured,
-    ensure_tab,
     is_speed_wealth,
     mark_refunded,
     paid_at,
+    prepare_tab,
     record_payment,
 )
 
@@ -233,12 +233,13 @@ def _prepare_rotterdam_tab() -> None:
         log.info("sheet not configured yet")
         return
     try:
-        ensure_tab(ROTTERDAM_TAB)
+        prepare_tab(ROTTERDAM_TAB)
         log.info("sheet tab ready %s", ROTTERDAM_TAB)
     except Exception:
         log.exception("could not prepare sheet tab %s", ROTTERDAM_TAB)
 
 
+@app.api_route("/", methods=["GET", "HEAD"])
 @app.get("/health")
 def health() -> dict:
     return {

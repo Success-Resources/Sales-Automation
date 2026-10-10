@@ -28,8 +28,9 @@ When the service starts, it renames the first tab from `SR Event Sales` to `MMI2
 6. Runtime: Python 3.
 7. Build command: `pip install -r requirements.txt`
 8. Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
-9. Instance type: the smallest paid or free instance you already use. A webhook must stay awake, so a free instance that sleeps will miss payments or answer Stripe late. Prefer the same always-on type as the Zendesk service.
-10. Add these environment variables before the first deploy finishes:
+9. Instance type: an always-on paid instance, the same kind as the Zendesk service. A free instance sleeps after a few minutes with no traffic. The next payment wakes it, Render restarts the process, and that payment is dropped.
+10. Health Check Path: `/health`. Render checks this path from inside the service. `/` also answers, so a check of the homepage is not a failure.
+11. Add these environment variables before the first deploy finishes:
 
 | Key | Value |
 | --- | --- |
@@ -38,8 +39,8 @@ When the service starts, it renames the first tab from `SR Event Sales` to `MMI2
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | The entire JSON file, as one value |
 | `SALES_SHEET_ID` | `1VWqP7raa6taFi9JCSN8NUXpVooPBM_6xuEF_IEVK-0E` |
 
-11. Create the web service. Wait until it is live.
-12. Open `https://<your-service>.onrender.com/health`. You want `"ok": true` and `"sheet_configured": true`. `stripe_configured` stays false until both Stripe values are set.
+12. Create the web service. Wait until it is live.
+13. Open `https://<your-service>.onrender.com/health`. You want `"ok": true` and `"sheet_configured": true`. `stripe_configured` stays false until both Stripe values are set.
 
 ## 3. Stripe products for the Rotterdam test
 

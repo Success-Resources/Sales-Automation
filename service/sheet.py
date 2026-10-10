@@ -380,20 +380,25 @@ def organize_tab(api, tab: str, payments: list[list[str]] | None = None) -> None
             row[2] = "full"
             row[3] = ""
     values, blocks = _layout(payments)
-    api.spreadsheets().values().clear(
-        spreadsheetId=_sheet_id(),
-        range=f"'{tab}'!A:Q",
-    ).execute()
     api.spreadsheets().values().update(
         spreadsheetId=_sheet_id(),
         range=f"'{tab}'!A1",
         valueInputOption="RAW",
         body={"values": values},
     ).execute()
+    api.spreadsheets().values().clear(
+        spreadsheetId=_sheet_id(),
+        range=f"'{tab}'!A{len(values) + 1}:Q",
+    ).execute()
     api.spreadsheets().batchUpdate(
         spreadsheetId=_sheet_id(),
         body={"requests": _paint(sheet_id, len(values), blocks)},
     ).execute()
+
+
+def prepare_tab(tab: str) -> None:
+    """Create the event tab if it is missing. Do not rewrite payments on boot."""
+    _ensure_tab_exists(_api(), tab)
 
 
 def ensure_tab(tab: str) -> None:
