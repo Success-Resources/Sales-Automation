@@ -121,7 +121,6 @@ def _row(
     product_name: str,
     product_id: str,
     payment_intent: str,
-    invoice_id: str,
     installment: str = "",
 ) -> list[str]:
     return [
@@ -137,7 +136,6 @@ def _row(
         product_name,
         product_id,
         payment_intent,
-        invoice_id,
         "succeeded",
     ]
 
@@ -186,7 +184,6 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
         product_name=product_name,
         product_id=product_id,
         payment_intent=_id(loaded.get("payment_intent")),
-        invoice_id=_id(loaded.get("invoice")),
         installment=remaining,
     )
 
@@ -226,7 +223,6 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
         product_name=product_name,
         product_id=product_id,
         payment_intent=_id(loaded.get("payment_intent")),
-        invoice_id=str(loaded.get("id") or ""),
         installment=remaining,
     )
 

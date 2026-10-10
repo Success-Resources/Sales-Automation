@@ -23,12 +23,10 @@ HEADERS = [
     "Stripe product name",
     "Stripe product id",
     "Payment ID",
-    "Invoice id",
     "Status",
 ]
 _PAYMENT_ID = 11
-_INVOICE_ID = 12
-_STATUS = 13
+_STATUS = 12
 _COLUMNS = len(HEADERS)
 _GAP = 3
 PLACEHOLDER_TAB = "SR Event Sales"
@@ -93,7 +91,12 @@ def _values(api, tab: str) -> list[list[str]]:
 
 
 def _pad(row: list) -> list[str]:
-    cells = [str(cell) for cell in row[:_COLUMNS]]
+    cells = [str(cell) for cell in row]
+    invoice = cells[12].strip() if len(cells) > 12 else ""
+    status = cells[13].strip() if len(cells) > 13 else ""
+    if status in {"succeeded", "refunded", "failed", "Status"} or invoice in {"Invoice id"} or invoice.startswith("in_"):
+        cells = cells[:12] + cells[13:]
+    cells = cells[:_COLUMNS]
     return cells + [""] * (_COLUMNS - len(cells))
 
 
@@ -188,7 +191,7 @@ def _paint(sheet_id: int, height: int, blocks: list[tuple[int, int, str, str]]) 
         "startRowIndex": 0,
         "endRowIndex": clear_until,
         "startColumnIndex": 0,
-        "endColumnIndex": _COLUMNS,
+        "endColumnIndex": 17,
     }
     requests: list[dict] = [
         {"unmergeCells": {"range": span}},
@@ -356,7 +359,7 @@ def _unmerge_tab(api, tab: str) -> int:
                                 "startRowIndex": 0,
                                 "endRowIndex": rows,
                                 "startColumnIndex": 0,
-                                "endColumnIndex": _COLUMNS,
+                                "endColumnIndex": 17,
                             }
                         }
                     }
@@ -401,13 +404,9 @@ def ensure_tab(tab: str) -> None:
 
 def _duplicate(payments: list[list[str]], row: list[str]) -> bool:
     payment_id = row[_PAYMENT_ID].strip()
-    invoice_id = row[_INVOICE_ID].strip()
-    for existing in payments:
-        if payment_id and existing[_PAYMENT_ID].strip() == payment_id:
-            return True
-        if invoice_id and existing[_INVOICE_ID].strip() == invoice_id:
-            return True
-    return False
+    if not payment_id:
+        return False
+    return any(existing[_PAYMENT_ID].strip() == payment_id for existing in payments)
 
 
 def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:

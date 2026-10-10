@@ -82,8 +82,7 @@ Columns, in this order:
 10. Stripe product name
 11. Stripe product id
 12. Payment ID
-13. Invoice id (installments)
-14. Status (`succeeded`, `refunded`, `failed`)
+13. Status (`succeeded`, `refunded`, `failed`)
 
 A refund moves that row out of its programme group and into the Refunded group. It does not add a second row.
 
@@ -115,7 +114,7 @@ Stripe events to subscribe to:
 
 Ignore unpaid, failed, and incomplete sessions. Only write a row when Stripe says the money was paid.
 
-The service matches an existing row by Payment ID or Invoice id. If Stripe sends the same payment again, the service does nothing. That is normal. Stripe retries when a response is slow.
+The service matches an existing row by Payment ID. If Stripe sends the same payment again, the service does nothing. That is normal. Stripe retries when a response is slow.
 
 Installments: each paid invoice is its own row. The installment number counts earlier installment rows for the same email and programme. The sheet then shows payment 1, payment 2, and payment 3 for that person, each with its own Payment ID.
 
