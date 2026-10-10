@@ -98,7 +98,10 @@ def _pad(row: list) -> list[str]:
 
 
 def _is_header(row: list[str]) -> bool:
-    return row[:_COLUMNS] == HEADERS
+    if row[:_COLUMNS] == HEADERS:
+        return True
+    # A merged title used to swallow every header cell except Paid at.
+    return row[0].strip() == HEADERS[0] and not row[_PAYMENT_ID].strip()
 
 
 def _is_blank(row: list[str]) -> bool:
@@ -318,9 +321,47 @@ def _ensure_tab_exists(api, tab: str) -> None:
     ).execute()
 
 
+def _unmerge_tab(api, tab: str) -> int:
+    """Drop every merged title before writing. A stale merge keeps only column A."""
+    meta = (
+        api.spreadsheets()
+        .get(
+            spreadsheetId=_sheet_id(),
+            fields="sheets(properties(title,sheetId,gridProperties(rowCount)))",
+        )
+        .execute()
+    )
+    for sheet in meta.get("sheets") or []:
+        props = sheet["properties"]
+        if props["title"] != tab:
+            continue
+        sheet_id = props["sheetId"]
+        rows = int((props.get("gridProperties") or {}).get("rowCount") or 1000)
+        api.spreadsheets().batchUpdate(
+            spreadsheetId=_sheet_id(),
+            body={
+                "requests": [
+                    {
+                        "unmergeCells": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": 0,
+                                "endRowIndex": rows,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": _COLUMNS,
+                            }
+                        }
+                    }
+                ]
+            },
+        ).execute()
+        return sheet_id
+    raise KeyError(tab)
+
+
 def organize_tab(api, tab: str, payments: list[list[str]] | None = None) -> None:
     """Rebuild one event tab: a colored block per programme, three blank rows between blocks."""
-    sheet_id = _tabs(api)[tab]
+    sheet_id = _unmerge_tab(api, tab)
     if payments is None:
         payments = _payment_rows(_values(api, tab))
     values, blocks = _layout(payments)
