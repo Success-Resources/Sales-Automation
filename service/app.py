@@ -91,14 +91,11 @@ def _row(
     currency: str,
     customer_name: str,
     customer_email: str,
+    phone: str,
     product_name: str,
     product_id: str,
     payment_intent: str,
-    charge: str,
-    checkout_id: str,
     invoice_id: str,
-    subscription_id: str,
-    event_id: str,
 ) -> list[str]:
     return [
         paid_at(when),
@@ -109,15 +106,12 @@ def _row(
         (currency or "").upper(),
         customer_name,
         customer_email,
+        phone,
         product_name,
         product_id,
         payment_intent,
-        charge,
-        checkout_id,
         invoice_id,
-        subscription_id,
         "succeeded",
-        event_id,
     ]
 
 
@@ -157,14 +151,11 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
         currency=str(loaded.get("currency") or ""),
         customer_name=str(details.get("name") or ""),
         customer_email=str(details.get("email") or loaded.get("customer_email") or ""),
+        phone=str(details.get("phone") or ""),
         product_name=product_name,
         product_id=product_id,
         payment_intent=_id(loaded.get("payment_intent")),
-        charge="",
-        checkout_id=str(loaded.get("id") or ""),
         invoice_id=_id(loaded.get("invoice")),
-        subscription_id=_id(loaded.get("subscription")),
-        event_id=str(event.get("id") or ""),
     )
 
 
@@ -195,14 +186,11 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
         currency=str(loaded.get("currency") or ""),
         customer_name=str(loaded.get("customer_name") or ""),
         customer_email=str(loaded.get("customer_email") or ""),
+        phone=str(loaded.get("customer_phone") or ""),
         product_name=product_name,
         product_id=product_id,
         payment_intent=_id(loaded.get("payment_intent")),
-        charge=_id(loaded.get("charge")),
-        checkout_id="",
         invoice_id=str(loaded.get("id") or ""),
-        subscription_id=subscription_id,
-        event_id=str(event.get("id") or ""),
     )
 
 
@@ -256,13 +244,13 @@ async def stripe_webhook(request: Request) -> JSONResponse:
             if not built:
                 return JSONResponse({"ok": True, "result": "skipped"})
             tab, row = built
-            result = record_payment(tab, row)
+            result = record_payment(tab, row, _id(obj.get("subscription")))
         elif kind == "invoice.paid":
             built = _from_invoice(obj, event)
             if not built:
                 return JSONResponse({"ok": True, "result": "skipped"})
             tab, row = built
-            result = record_payment(tab, row)
+            result = record_payment(tab, row, _id(obj.get("subscription")))
         elif kind == "charge.refunded":
             result = mark_refunded(_id(obj.get("payment_intent")))
             tab = ""

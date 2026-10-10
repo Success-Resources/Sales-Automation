@@ -66,7 +66,7 @@ One spreadsheet, for example **SR Event Sales**.
 
 One tab per MMI event. The tab name is the event code from the left side of the Stripe name: `MMI2609MAD`, `MMI2609STO`, `MMI2610MAD`.
 
-Each tab is one table. A new payment is one new row. Filter the Programme column to see only Quantum Leap 2027, only Never Work Again 2027, and so on.
+Each tab is grouped by programme. Each group starts with a title row, then the column header row, then its payment rows. The titles are Speed Wealth Book, Never Work Again, GBI, TTT, EWC, and QL. Three empty rows separate the groups. A new payment is inserted into its own group, and the whole group stays highlighted: Speed Wealth Book light green, Never Work Again light purple, Guerrilla Business Intensive dark green, Train the Trainer orange, Enlightened Warrior Camp dark red, Quantum Leap gray.
 
 Columns, in this order:
 
@@ -78,15 +78,12 @@ Columns, in this order:
 6. Currency
 7. Customer name
 8. Customer email
-9. Stripe product name
-10. Stripe product id
-11. Payment Intent id
-12. Charge id
-13. Checkout Session id
-14. Invoice id (installments)
-15. Subscription id (installments)
-16. Status (`succeeded`, `refunded`, `failed`)
-17. Stripe event id (used so a retry does not add the same payment twice)
+9. Phone number
+10. Stripe product name
+11. Stripe product id
+12. Payment ID
+13. Invoice id (installments)
+14. Status (`succeeded`, `refunded`, `failed`)
 
 A refund updates the existing row to `refunded`. It does not add a second row.
 
@@ -118,9 +115,9 @@ Stripe events to subscribe to:
 
 Ignore unpaid, failed, and incomplete sessions. Only write a row when Stripe says the money was paid.
 
-The service stores the Stripe event id. If Stripe sends the same event again, the service does nothing. That is normal. Stripe retries when a response is slow.
+The service matches an existing row by Payment ID or Invoice id. If Stripe sends the same payment again, the service does nothing. That is normal. Stripe retries when a response is slow.
 
-Installments: each paid invoice is its own row, with the same Subscription id and an installment number. The sheet then shows payment 1, payment 2, and payment 3 for that person, each with its own Payment Intent id.
+Installments: each paid invoice is its own row. The installment number counts earlier installment rows for the same email and programme. The sheet then shows payment 1, payment 2, and payment 3 for that person, each with its own Payment ID.
 
 ## What the service is
 

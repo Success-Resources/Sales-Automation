@@ -47,7 +47,9 @@ In Stripe, turn **Test mode** on. Create one product for the test, named exactly
 
 `MMI2610ROT | Speed Wealth Book`
 
-Add a price, for example 10.00 EUR, one-time. Create a Payment Link for that price. The QR code later is that link. For the test, open the link in a browser.
+Add an installment price, for example 10.00 EUR. Create a Payment Link for that price. The QR code later is that link. For the test, open the link in a browser.
+
+A one-time full payment is a second price on the same product. That payment is recorded only when the destination also receives `checkout.session.completed`. On this Stripe account that event is not in the list you can select, so the first test is the installment price.
 
 The other Rotterdam products, when you are ready, use the same left side and a different programme:
 
@@ -60,23 +62,31 @@ The other Rotterdam products, when you are ready, use the same left side and a d
 
 A full payment and an installment plan are two prices on that product. Each price has its own Payment Link.
 
-## 4. Stripe webhook
+## 4. Stripe event destination
 
-1. Stripe → Developers → Webhooks → Add endpoint.
-2. Endpoint URL: `https://<your-service>.onrender.com/stripe/webhook`
-3. Select these events: `checkout.session.completed`, `invoice.paid`, `charge.refunded`.
-4. Add endpoint. Open it and reveal the signing secret.
-5. Paste that secret into Render as `STRIPE_WEBHOOK_SECRET`. Save. Render redeploys.
-6. Check `/health` again. `stripe_configured` should be true.
+Stripe does not show **Add endpoint**. The control is **Create an event destination** (Workbench → Webhooks). Stay in **Test mode**.
+
+1. Event destination scope: **Your account**.
+2. Payload style: **Snapshot**. Do not choose Thin. Thin shows an Accounts v2 group, and that group is not these payment events.
+3. API version: **2026-08-26.dahlia**. Do not choose `2026-08-26.preview`, or the 2018 and 2019 versions.
+4. Events. The screen opens on the **Subscriptions** group. That group includes `invoice.paid`. Select it.
+   - `checkout.session.completed` is in the **Checkout** group. It records a one-time full payment. Installments are not taken from this event.
+   - `charge.refunded` is in the **Charge** group. It does not add a row. It marks an existing row `refunded`.
+   - Developer access is enough to see those groups. On this account the list still shows only Subscriptions, so select `invoice.paid` and continue. The account owner can add the other two events on this same destination later.
+5. Destination type: **Webhook endpoint**.
+6. Endpoint URL: `https://<your-service>.onrender.com/stripe/webhook`
+7. Create the destination. Open it and reveal the signing secret. It starts with `whsec_`.
+8. Paste that secret into Render as `STRIPE_WEBHOOK_SECRET`. Save. Render redeploys.
+9. Check `/health` again. `stripe_configured` should be true.
 
 ## 5. Make a test payment
 
-1. Open the Payment Link for `MMI2610ROT | Speed Wealth Book`.
+1. Open the installment Payment Link for `MMI2610ROT | Speed Wealth Book`.
 2. Pay with the test card `4242 4242 4242 4242`, any future expiry, any CVC.
 3. Open the SR Event Sales sheet, tab `MMI2610ROT`.
-4. One row should appear: programme `Speed Wealth Book`, payment plan `full`, status `succeeded`, and a Payment Intent id.
-5. In Stripe, refund that test payment. The same row should change to `refunded`. A second row should not appear.
+4. The row should appear in the light green Speed Wealth Book group: programme `Speed Wealth Book`, payment plan `installment`, installment `1`, status `succeeded`, and a Payment ID.
+5. A later installment on the same plan is inserted into that same group, with the next installment number. The other programme groups stay where they are, with three empty rows between groups.
 
-An installment price records one row per paid invoice, with the same Subscription id and installment numbers 1, 2, 3.
+A refund updates that row to `refunded` only after `charge.refunded` is added to the destination. Until then, a refund in Stripe does not change the sheet. A one-time full payment is written only after `checkout.session.completed` is added.
 
 A product whose name does not contain the event code, a space, a vertical bar, a space, and the programme is ignored. Stripe still gets a success response, and nothing is written to the sheet.
