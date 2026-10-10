@@ -21,6 +21,7 @@ from sheet import (
     amount_major,
     configured as sheet_configured,
     ensure_tab,
+    is_speed_wealth,
     mark_refunded,
     paid_at,
     record_payment,
@@ -69,7 +70,32 @@ def _product_from_price(price) -> tuple[str, str]:
     return "", ""
 
 
-def _first_matching_product(lines: list) -> tuple[str, str, tuple[str, str]] | None:
+def _preset_cents(price) -> int | None:
+    """Suggested amount on a customer-chooses-the-price Stripe price, in minor units."""
+    price = _as_dict(price)
+    custom = price.get("custom_unit_amount")
+    if not isinstance(custom, dict):
+        custom = _as_dict(custom) if custom else {}
+    preset = custom.get("preset")
+    if preset is None:
+        return None
+    return int(preset)
+
+
+def _plan_for(programme: str, paid_cents: int, preset_cents: int | None, currency: str, subscription: bool) -> tuple[str, str]:
+    """Speed Wealth Book is always full. Other programmes use the Stripe suggested amount."""
+    if is_speed_wealth(programme):
+        return "full", ""
+    if preset_cents:
+        if paid_cents >= preset_cents:
+            return "full", ""
+        return "installment", amount_major(preset_cents - paid_cents, currency)
+    if subscription:
+        return "installment", ""
+    return "full", ""
+
+
+def _first_matching_product(lines: list) -> tuple[str, str, tuple[str, str], int | None] | None:
     for line in lines:
         line = _as_dict(line)
         price = line.get("price") or {}
@@ -78,7 +104,7 @@ def _first_matching_product(lines: list) -> tuple[str, str, tuple[str, str]] | N
             name = str(line.get("description") or "")
         parsed = parse_product_name(name)
         if parsed:
-            return name, product_id, parsed
+            return name, product_id, parsed, _preset_cents(price)
     return None
 
 
@@ -96,12 +122,13 @@ def _row(
     product_id: str,
     payment_intent: str,
     invoice_id: str,
+    installment: str = "",
 ) -> list[str]:
     return [
         paid_at(when),
         programme,
         plan,
-        "",
+        installment,
         amount_major(amount, currency),
         (currency or "").upper(),
         customer_name,
@@ -136,19 +163,23 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
     if not found:
         log.info("checkout ignored, no event product session=%s", session.get("id"))
         return None
-    product_name, product_id, (tab, programme) = found
+    product_name, product_id, (tab, programme), preset = found
     details = loaded.get("customer_details") or {}
-    plan = "installment" if loaded.get("mode") == "subscription" else "full"
-    # The first subscription invoice is recorded from invoice.paid, not here.
-    if plan == "installment":
+    paid = int(loaded.get("amount_total") or 0)
+    currency = str(loaded.get("currency") or "")
+    subscription = loaded.get("mode") == "subscription"
+    if subscription and not is_speed_wealth(programme) and not preset:
+        # A Stripe subscription's first invoice is recorded from invoice.paid, not here.
         log.info("checkout subscription deferred to invoice.paid session=%s", session.get("id"))
         return None
+    plan, remaining = _plan_for(programme, paid, preset, currency, subscription)
+    log.info("checkout plan=%s preset=%s paid=%s remaining=%s", plan, preset, paid, remaining or "0")
     return tab, _row(
         when=int(event.get("created") or loaded.get("created") or 0),
         programme=programme,
         plan=plan,
-        amount=int(loaded.get("amount_total") or 0),
-        currency=str(loaded.get("currency") or ""),
+        amount=paid,
+        currency=currency,
         customer_name=str(details.get("name") or ""),
         customer_email=str(details.get("email") or loaded.get("customer_email") or ""),
         phone=str(details.get("phone") or ""),
@@ -156,6 +187,7 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
         product_id=product_id,
         payment_intent=_id(loaded.get("payment_intent")),
         invoice_id=_id(loaded.get("invoice")),
+        installment=remaining,
     )
 
 
@@ -171,8 +203,12 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
     if not found:
         log.info("invoice ignored, no event product invoice=%s", invoice.get("id"))
         return None
-    product_name, product_id, (tab, programme) = found
+    product_name, product_id, (tab, programme), preset = found
     subscription_id = _id(loaded.get("subscription"))
+    paid = int(loaded.get("amount_paid") or 0)
+    currency = str(loaded.get("currency") or "")
+    plan, remaining = _plan_for(programme, paid, preset, currency, bool(subscription_id))
+    log.info("invoice plan=%s preset=%s paid=%s remaining=%s", plan, preset, paid, remaining or "0")
     return tab, _row(
         when=int(
             event.get("created")
@@ -181,9 +217,9 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
             or 0
         ),
         programme=programme,
-        plan="installment" if subscription_id else "full",
-        amount=int(loaded.get("amount_paid") or 0),
-        currency=str(loaded.get("currency") or ""),
+        plan=plan,
+        amount=paid,
+        currency=currency,
         customer_name=str(loaded.get("customer_name") or ""),
         customer_email=str(loaded.get("customer_email") or ""),
         phone=str(loaded.get("customer_phone") or ""),
@@ -191,6 +227,7 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
         product_id=product_id,
         payment_intent=_id(loaded.get("payment_intent")),
         invoice_id=str(loaded.get("id") or ""),
+        installment=remaining,
     )
 
 

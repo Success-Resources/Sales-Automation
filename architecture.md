@@ -72,8 +72,8 @@ Columns, in this order:
 
 1. Paid at (UTC)
 2. Programme (the text after the bar, for example `Quantum Leap 2027`)
-3. Payment plan (`full` or `installment`)
-4. Installment (blank for a full payment, otherwise `1`, `2`, `3`, ...)
+3. Payment plan (`full` when the customer pays the suggested Stripe amount, otherwise `installment`). Speed Wealth Book is always `full`.
+4. Installment (remaining) (blank for a full payment, otherwise the suggested amount minus what they paid)
 5. Amount
 6. Currency
 7. Customer name

@@ -84,8 +84,8 @@ Stripe does not show **Add endpoint**. The control is **Create an event destinat
 1. Open the installment Payment Link for `MMI2610ROT | Speed Wealth Book`.
 2. Pay with the test card `4242 4242 4242 4242`, any future expiry, any CVC.
 3. Open the SR Event Sales sheet, tab `MMI2610ROT`.
-4. The row should appear in the light green Speed Wealth Book group: programme `Speed Wealth Book`, payment plan `installment`, installment `1`, status `succeeded`, and a Payment ID.
-5. A later installment on the same plan is inserted into that same group, with the next installment number. The other programme groups stay where they are, with three empty rows between groups.
+4. The row should appear in the light green Speed Wealth Book group: programme `Speed Wealth Book`, payment plan `full`, status `succeeded`, and a Payment ID. Speed Wealth Book is always `full`. For Never Work Again, GBI, TTT, EWC, and Quantum Leap, payment plan is `full` when the amount equals the suggested amount on that Stripe price. If the customer pays less, payment plan is `installment` and Installment (remaining) is the suggested amount minus what they paid.
+5. A later payment for the same programme is inserted into that same group. The other programme groups stay where they are, with three empty rows between groups.
 
 A refund moves that row into the light red Refunded group, after QL, only after `charge.refunded` is added to the destination. Until then, a refund in Stripe does not change the sheet. A one-time full payment is written only after `checkout.session.completed` is added.
 

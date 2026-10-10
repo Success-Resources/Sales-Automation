@@ -14,7 +14,7 @@ HEADERS = [
     "Paid at",
     "Programme",
     "Payment plan",
-    "Installment",
+    "Installment (remaining)",
     "Amount",
     "Currency",
     "Customer name",
@@ -100,8 +100,10 @@ def _pad(row: list) -> list[str]:
 def _is_header(row: list[str]) -> bool:
     if row[:_COLUMNS] == HEADERS:
         return True
-    # A merged title used to swallow every header cell except Paid at.
-    return row[0].strip() == HEADERS[0] and not row[_PAYMENT_ID].strip()
+    # Older sheets used "Installment", and a merged title used to leave only "Paid at".
+    first = row[0].strip()
+    second = row[1].strip() if len(row) > 1 else ""
+    return first == HEADERS[0] and second in {"", HEADERS[1]}
 
 
 def _is_blank(row: list[str]) -> bool:
@@ -124,6 +126,12 @@ def _payment_rows(rows: list[list]) -> list[list[str]]:
 
 def _programme_key(programme: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (programme or "").lower())
+
+
+def is_speed_wealth(programme: str) -> bool:
+    """Speed Wealth Book is sold in full only."""
+    key = _programme_key(programme)
+    return "speedwealth" in key or key == "swb"
 
 
 def _section_for(programme: str) -> int | None:
@@ -364,6 +372,10 @@ def organize_tab(api, tab: str, payments: list[list[str]] | None = None) -> None
     sheet_id = _unmerge_tab(api, tab)
     if payments is None:
         payments = _payment_rows(_values(api, tab))
+    for row in payments:
+        if is_speed_wealth(row[1]):
+            row[2] = "full"
+            row[3] = ""
     values, blocks = _layout(payments)
     api.spreadsheets().values().clear(
         spreadsheetId=_sheet_id(),
@@ -407,7 +419,7 @@ def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:
     if _duplicate(payments, row):
         organize_tab(api, tab, payments)
         return "duplicate"
-    if row[2] == "installment":
+    if row[2] == "installment" and not row[3].strip():
         email = row[7]
         programme = row[1]
         already = sum(
