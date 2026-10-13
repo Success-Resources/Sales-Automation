@@ -109,20 +109,43 @@ def _preset_cents(price) -> int | None:
     return int(preset)
 
 
-def _plan_for(programme: str, paid_cents: int, preset_cents: int | None, currency: str, subscription: bool) -> tuple[str, str]:
-    """Speed Wealth Book is always full. Other programmes use the Stripe suggested amount."""
+def _programme_price_cents(price) -> int | None:
+    """Full programme price: the suggested amount, or the fixed Stripe price when there is no suggestion."""
+    preset = _preset_cents(price)
+    if preset:
+        return preset
+    unit = _as_dict(price).get("unit_amount")
+    if unit is None:
+        return None
+    return int(unit)
+
+
+def _plan_for(
+    programme: str,
+    paid_cents: int,
+    preset_cents: int | None,
+    price_cents: int | None,
+    currency: str,
+    subscription: bool,
+) -> tuple[str, str, str]:
+    """Speed Wealth Book is always full. Other programmes use the Stripe suggested amount.
+
+    A full payment leaves Installment (remaining) at zero. Programme price is the full price.
+    """
+    price = amount_major(price_cents, currency) if price_cents else ""
+    nothing_left = amount_major(0, currency)
     if is_speed_wealth(programme):
-        return "full", ""
+        return "full", nothing_left, price or amount_major(paid_cents, currency)
     if preset_cents:
         if paid_cents >= preset_cents:
-            return "full", ""
-        return "installment", amount_major(preset_cents - paid_cents, currency)
+            return "full", nothing_left, price
+        return "installment", amount_major(preset_cents - paid_cents, currency), price
     if subscription:
-        return "installment", ""
-    return "full", ""
+        return "installment", "", price
+    return "full", nothing_left, price or amount_major(paid_cents, currency)
 
 
-def _first_matching_product(lines: list) -> tuple[str, str, tuple[str, str], int | None] | None:
+def _first_matching_product(lines: list) -> tuple[str, str, tuple[str, str], int | None, int | None] | None:
     for line in lines:
         line = _as_dict(line)
         price = line.get("price") or {}
@@ -131,7 +154,7 @@ def _first_matching_product(lines: list) -> tuple[str, str, tuple[str, str], int
             name = str(line.get("description") or "")
         parsed = parse_product_name(name)
         if parsed:
-            return name, product_id, parsed, _preset_cents(price)
+            return name, product_id, parsed, _preset_cents(price), _programme_price_cents(price)
     return None
 
 
@@ -139,6 +162,7 @@ def _row(
     *,
     when: int,
     programme: str,
+    programme_price: str,
     plan: str,
     amount: int,
     currency: str,
@@ -153,6 +177,7 @@ def _row(
     return [
         paid_at(when),
         programme,
+        programme_price,
         plan,
         installment,
         amount_major(amount, currency),
@@ -188,7 +213,7 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
     if not found:
         log.info("checkout ignored, no event product session=%s", session.get("id"))
         return None
-    product_name, product_id, (tab, programme), preset = found
+    product_name, product_id, (tab, programme), preset, price_cents = found
     details = loaded.get("customer_details") or {}
     paid = int(loaded.get("amount_total") or 0)
     currency = str(loaded.get("currency") or "")
@@ -197,11 +222,19 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
         # A Stripe subscription's first invoice is recorded from invoice.paid, not here.
         log.info("checkout subscription deferred to invoice.paid session=%s", session.get("id"))
         return None
-    plan, remaining = _plan_for(programme, paid, preset, currency, subscription)
-    log.info("checkout plan=%s preset=%s paid=%s remaining=%s", plan, preset, paid, remaining or "0")
+    plan, remaining, programme_price = _plan_for(programme, paid, preset, price_cents, currency, subscription)
+    log.info(
+        "checkout plan=%s price=%s preset=%s paid=%s remaining=%s",
+        plan,
+        programme_price,
+        preset,
+        paid,
+        remaining,
+    )
     return tab, _row(
         when=int(event.get("created") or loaded.get("created") or 0),
         programme=programme,
+        programme_price=programme_price,
         plan=plan,
         amount=paid,
         currency=currency,
@@ -227,12 +260,21 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
     if not found:
         log.info("invoice ignored, no event product invoice=%s", invoice.get("id"))
         return None
-    product_name, product_id, (tab, programme), preset = found
+    product_name, product_id, (tab, programme), preset, price_cents = found
     subscription_id = _id(loaded.get("subscription"))
     paid = int(loaded.get("amount_paid") or 0)
     currency = str(loaded.get("currency") or "")
-    plan, remaining = _plan_for(programme, paid, preset, currency, bool(subscription_id))
-    log.info("invoice plan=%s preset=%s paid=%s remaining=%s", plan, preset, paid, remaining or "0")
+    plan, remaining, programme_price = _plan_for(
+        programme, paid, preset, price_cents, currency, bool(subscription_id)
+    )
+    log.info(
+        "invoice plan=%s price=%s preset=%s paid=%s remaining=%s",
+        plan,
+        programme_price,
+        preset,
+        paid,
+        remaining,
+    )
     return tab, _row(
         when=int(
             event.get("created")
@@ -241,6 +283,7 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
             or 0
         ),
         programme=programme,
+        programme_price=programme_price,
         plan=plan,
         amount=paid,
         currency=currency,

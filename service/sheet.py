@@ -18,9 +18,10 @@ from google.oauth2 import service_account
 HEADERS = [
     "Paid at",
     "Programme",
+    "Programme price",
     "Payment plan",
     "Installment (remaining)",
-    "Amount",
+    "Amount paid",
     "Currency",
     "Customer name",
     "Customer email",
@@ -30,8 +31,15 @@ HEADERS = [
     "Payment ID",
     "Status",
 ]
-_PAYMENT_ID = 11
-_STATUS = 12
+_PROGRAMME = 1
+_PRICE = 2
+_PLAN = 3
+_REMAINING = 4
+_PAID = 5
+_CURRENCY = 6
+_EMAIL = 8
+_PAYMENT_ID = 12
+_STATUS = 13
 _COLUMNS = len(HEADERS)
 _GAP = 3
 PLACEHOLDER_TAB = "SR Event Sales"
@@ -156,11 +164,19 @@ def _batch(requests: list[dict]) -> None:
 
 
 def _pad(row: list) -> list[str]:
+    """Fit a row to the current columns.
+
+    Rows written before Programme price have Payment plan in column C.
+    Rows written before Invoice id was removed have that id between Payment ID and Status.
+    """
     cells = [str(cell) for cell in row]
-    invoice = cells[12].strip() if len(cells) > 12 else ""
-    status = cells[13].strip() if len(cells) > 13 else ""
-    if status in {"succeeded", "refunded", "failed", "Status"} or invoice in {"Invoice id"} or invoice.startswith("in_"):
-        cells = cells[:12] + cells[13:]
+    if len(cells) > 13 and cells[2].strip() in {"full", "installment", "Payment plan"}:
+        invoice = cells[12].strip()
+        status = cells[13].strip()
+        if status in {"succeeded", "refunded", "failed", "Status"} or invoice in {"Invoice id"} or invoice.startswith("in_"):
+            cells = cells[:12] + cells[13:]
+    if len(cells) >= 3 and cells[2].strip() in {"full", "installment", "Payment plan"}:
+        cells = cells[:2] + [""] + cells[2:]
     cells = cells[:_COLUMNS]
     return cells + [""] * (_COLUMNS - len(cells))
 
@@ -224,7 +240,7 @@ def _layout(payments: list[list[str]]) -> tuple[list[list[str]], list[tuple[int,
         if _is_refunded(row):
             refunded.append(row)
             continue
-        section = _section_for(row[1])
+        section = _section_for(row[_PROGRAMME])
         if section is None:
             other.append(row)
         else:
@@ -418,9 +434,7 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     if payments is None:
         payments = _payment_rows(_values(tab))
     for row in payments:
-        if is_speed_wealth(row[1]):
-            row[2] = "full"
-            row[3] = ""
+        _normalize_payment(row)
     values, blocks = _layout(payments)
     target = urllib.parse.quote(f"'{tab}'!A1", safe="")
     _call(
@@ -458,19 +472,19 @@ def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:
     if _duplicate(payments, row):
         organize_tab(tab, payments)
         return "duplicate"
-    if row[2] == "installment" and not row[3].strip():
-        email = row[7]
-        programme = row[1]
+    if row[_PLAN] == "installment" and not row[_REMAINING].strip():
+        email = row[_EMAIL]
+        programme = row[_PROGRAMME]
         already = sum(
             1
             for existing in payments
-            if existing[1] == programme
-            and existing[2] == "installment"
+            if existing[_PROGRAMME] == programme
+            and existing[_PLAN] == "installment"
             and email
-            and existing[7] == email
+            and existing[_EMAIL] == email
         )
         if subscription_id or email:
-            row[3] = str(already + 1)
+            row[_REMAINING] = str(already + 1)
     payments.append(row)
     organize_tab(tab, payments)
     return "written"
@@ -494,6 +508,40 @@ def mark_refunded(payment_intent: str) -> str:
 
 def paid_at(timestamp: int) -> str:
     return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _money(value: str) -> float | None:
+    text = (value or "").strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _normalize_payment(row: list[str]) -> None:
+    """A full payment has nothing left to pay. Older rows get a programme price from what was stored."""
+    currency = row[_CURRENCY]
+    if is_speed_wealth(row[_PROGRAMME]):
+        row[_PLAN] = "full"
+    if row[_PLAN] == "full":
+        row[_REMAINING] = amount_major(0, currency)
+        if not row[_PRICE].strip():
+            row[_PRICE] = row[_PAID]
+        return
+    if row[_PRICE].strip():
+        return
+    paid = _money(row[_PAID])
+    remaining_text = row[_REMAINING].strip()
+    remaining = _money(remaining_text)
+    if paid is None or remaining is None:
+        return
+    # 1, 2, 3 is the old installment count, not a balance.
+    if "." not in remaining_text and "." in row[_PAID]:
+        return
+    total = paid + remaining
+    row[_PRICE] = f"{total:.2f}" if "." in row[_PAID] or "." in remaining_text else str(int(round(total)))
 
 
 def amount_major(cents: int, currency: str) -> str:
