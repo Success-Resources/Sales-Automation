@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
+
+# google-api-python-client builds a huge discovery client and was crossing
+# Render's 512 MB limit on a single payment. These calls use the Sheets REST API.
 
 HEADERS = [
     "Paid at",
@@ -66,28 +71,88 @@ def _sheet_id() -> str:
     return os.getenv("SALES_SHEET_ID", "").strip()
 
 
-def _api():
-    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+_SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
+_creds = None
 
 
-def _tabs(api) -> dict[str, int]:
-    meta = api.spreadsheets().get(spreadsheetId=_sheet_id()).execute()
+class _AuthResponse:
+    def __init__(self, status: int, data: bytes):
+        self.status = status
+        self.data = data
+
+
+class _AuthRequest:
+    def __call__(self, url, method="GET", body=None, headers=None, timeout=60, **kwargs):
+        request = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return _AuthResponse(response.status, response.read())
+        except urllib.error.HTTPError as exc:
+            return _AuthResponse(exc.code, exc.read())
+
+
+def _token() -> str:
+    global _creds
+    if _creds is None:
+        info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        _creds = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
+    if not _creds.valid:
+        _creds.refresh(_AuthRequest())
+    return _creds.token
+
+
+def _call(method: str, url: str, body: dict | None = None) -> dict:
+    data = None if body is None else json.dumps(body).encode()
+    headers = {"Authorization": f"Bearer {_token()}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Sheets {method} {exc.code}: {detail}") from exc
+    return json.loads(raw) if raw else {}
+
+
+def _sheet_url(suffix: str = "") -> str:
+    return f"{_SHEETS}/{urllib.parse.quote(_sheet_id(), safe='')}{suffix}"
+
+
+def _tabs() -> dict[str, int]:
+    meta = _call(
+        "GET",
+        _sheet_url("?fields=sheets(properties(title,sheetId,gridProperties(rowCount)))"),
+    )
     return {
         sheet["properties"]["title"]: sheet["properties"]["sheetId"]
         for sheet in meta.get("sheets") or []
     }
 
 
-def _values(api, tab: str) -> list[list[str]]:
-    result = (
-        api.spreadsheets()
-        .values()
-        .get(spreadsheetId=_sheet_id(), range=f"'{tab}'!A:N")
-        .execute()
+def _tab_row_count(tab: str) -> tuple[int, int]:
+    meta = _call(
+        "GET",
+        _sheet_url("?fields=sheets(properties(title,sheetId,gridProperties(rowCount)))"),
     )
+    for sheet in meta.get("sheets") or []:
+        props = sheet["properties"]
+        if props["title"] != tab:
+            continue
+        rows = int((props.get("gridProperties") or {}).get("rowCount") or 1000)
+        return props["sheetId"], rows
+    raise KeyError(tab)
+
+
+def _values(tab: str) -> list[list[str]]:
+    target = urllib.parse.quote(f"'{tab}'!A:N", safe="")
+    result = _call("GET", _sheet_url(f"/values/{target}"))
     return result.get("values") or []
+
+
+def _batch(requests: list[dict]) -> None:
+    _call("POST", _sheet_url(":batchUpdate"), {"requests": requests})
 
 
 def _pad(row: list) -> list[str]:
@@ -307,104 +372,75 @@ def _paint(sheet_id: int, height: int, blocks: list[tuple[int, int, str, str]]) 
     return requests
 
 
-def _ensure_tab_exists(api, tab: str) -> None:
-    titles = _tabs(api)
+def _ensure_tab_exists(tab: str) -> None:
+    titles = _tabs()
     if tab in titles:
         return
     if PLACEHOLDER_TAB in titles and tab == ROTTERDAM_TAB:
-        api.spreadsheets().batchUpdate(
-            spreadsheetId=_sheet_id(),
-            body={
-                "requests": [
-                    {
-                        "updateSheetProperties": {
-                            "properties": {"sheetId": titles[PLACEHOLDER_TAB], "title": tab},
-                            "fields": "title",
-                        }
+        _batch(
+            [
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": titles[PLACEHOLDER_TAB], "title": tab},
+                        "fields": "title",
                     }
-                ]
-            },
-        ).execute()
-        return
-    api.spreadsheets().batchUpdate(
-        spreadsheetId=_sheet_id(),
-        body={"requests": [{"addSheet": {"properties": {"title": tab}}}]},
-    ).execute()
-
-
-def _unmerge_tab(api, tab: str) -> int:
-    """Drop every merged title before writing. A stale merge keeps only column A."""
-    meta = (
-        api.spreadsheets()
-        .get(
-            spreadsheetId=_sheet_id(),
-            fields="sheets(properties(title,sheetId,gridProperties(rowCount)))",
+                }
+            ]
         )
-        .execute()
-    )
-    for sheet in meta.get("sheets") or []:
-        props = sheet["properties"]
-        if props["title"] != tab:
-            continue
-        sheet_id = props["sheetId"]
-        rows = int((props.get("gridProperties") or {}).get("rowCount") or 1000)
-        api.spreadsheets().batchUpdate(
-            spreadsheetId=_sheet_id(),
-            body={
-                "requests": [
-                    {
-                        "unmergeCells": {
-                            "range": {
-                                "sheetId": sheet_id,
-                                "startRowIndex": 0,
-                                "endRowIndex": rows,
-                                "startColumnIndex": 0,
-                                "endColumnIndex": 17,
-                            }
-                        }
+        return
+    _batch([{"addSheet": {"properties": {"title": tab}}}])
+
+
+def _unmerge_tab(tab: str) -> int:
+    """Drop every merged title before writing. A stale merge keeps only column A."""
+    sheet_id, rows = _tab_row_count(tab)
+    _batch(
+        [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": rows,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 17,
                     }
-                ]
-            },
-        ).execute()
-        return sheet_id
-    raise KeyError(tab)
+                }
+            }
+        ]
+    )
+    return sheet_id
 
 
-def organize_tab(api, tab: str, payments: list[list[str]] | None = None) -> None:
+def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     """Rebuild one event tab: a colored block per programme, three blank rows between blocks."""
-    sheet_id = _unmerge_tab(api, tab)
+    sheet_id = _unmerge_tab(tab)
     if payments is None:
-        payments = _payment_rows(_values(api, tab))
+        payments = _payment_rows(_values(tab))
     for row in payments:
         if is_speed_wealth(row[1]):
             row[2] = "full"
             row[3] = ""
     values, blocks = _layout(payments)
-    api.spreadsheets().values().update(
-        spreadsheetId=_sheet_id(),
-        range=f"'{tab}'!A1",
-        valueInputOption="RAW",
-        body={"values": values},
-    ).execute()
-    api.spreadsheets().values().clear(
-        spreadsheetId=_sheet_id(),
-        range=f"'{tab}'!A{len(values) + 1}:Q",
-    ).execute()
-    api.spreadsheets().batchUpdate(
-        spreadsheetId=_sheet_id(),
-        body={"requests": _paint(sheet_id, len(values), blocks)},
-    ).execute()
+    target = urllib.parse.quote(f"'{tab}'!A1", safe="")
+    _call(
+        "PUT",
+        _sheet_url(f"/values/{target}?valueInputOption=RAW"),
+        {"values": values},
+    )
+    clear_at = urllib.parse.quote(f"'{tab}'!A{len(values) + 1}:Q", safe="")
+    _call("POST", _sheet_url(f"/values/{clear_at}:clear"), {})
+    _batch(_paint(sheet_id, len(values), blocks))
 
 
 def prepare_tab(tab: str) -> None:
     """Create the event tab if it is missing. Do not rewrite payments on boot."""
-    _ensure_tab_exists(_api(), tab)
+    _ensure_tab_exists(tab)
 
 
 def ensure_tab(tab: str) -> None:
-    api = _api()
-    _ensure_tab_exists(api, tab)
-    organize_tab(api, tab)
+    _ensure_tab_exists(tab)
+    organize_tab(tab)
 
 
 def _duplicate(payments: list[list[str]], row: list[str]) -> bool:
@@ -416,12 +452,11 @@ def _duplicate(payments: list[list[str]], row: list[str]) -> bool:
 
 def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:
     """Insert a payment into its programme block. Return written or duplicate."""
-    api = _api()
-    _ensure_tab_exists(api, tab)
-    payments = _payment_rows(_values(api, tab))
+    _ensure_tab_exists(tab)
+    payments = _payment_rows(_values(tab))
     row = _pad(row)
     if _duplicate(payments, row):
-        organize_tab(api, tab, payments)
+        organize_tab(tab, payments)
         return "duplicate"
     if row[2] == "installment" and not row[3].strip():
         email = row[7]
@@ -437,23 +472,22 @@ def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:
         if subscription_id or email:
             row[3] = str(already + 1)
     payments.append(row)
-    organize_tab(api, tab, payments)
+    organize_tab(tab, payments)
     return "written"
 
 
 def mark_refunded(payment_intent: str) -> str:
     if not payment_intent:
         return "no_payment_intent"
-    api = _api()
-    for tab in _tabs(api):
-        payments = _payment_rows(_values(api, tab))
+    for tab in _tabs():
+        payments = _payment_rows(_values(tab))
         for index, existing in enumerate(payments):
             if existing[_PAYMENT_ID] == payment_intent:
                 already = _is_refunded(existing)
                 existing[_STATUS] = "refunded"
                 if not already:
                     payments.append(payments.pop(index))
-                organize_tab(api, tab, payments)
+                organize_tab(tab, payments)
                 return "refunded"
     return "not_found"
 

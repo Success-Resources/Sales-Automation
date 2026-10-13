@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import stripe
@@ -31,7 +32,34 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sales")
 
-app = FastAPI(title="SR Event Sales")
+
+class _HideHealthChecks(logging.Filter):
+    """Render probes /health every few seconds. Keep the check, drop the access line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn logs (client, method, path, version, status) and only
+        # builds the "GET /health HTTP/1.1" text later, while formatting.
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            path = str(args[2]).split("?", 1)[0]
+            return path not in {"/", "/health"}
+        return True
+
+
+def _quiet_health_logs() -> None:
+    logging.getLogger("uvicorn.access").addFilter(_HideHealthChecks())
+
+
+_quiet_health_logs()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _quiet_health_logs()
+    yield
+
+
+app = FastAPI(title="SR Event Sales", lifespan=_lifespan)
 
 
 def _stripe_ready() -> bool:
