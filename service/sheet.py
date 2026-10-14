@@ -457,6 +457,32 @@ def ensure_tab(tab: str) -> None:
     organize_tab(tab)
 
 
+def ensure_log_tab(tab: str) -> None:
+    """Create a plain tab. Do not rebuild it as a programme sheet."""
+    _ensure_tab_exists(tab)
+
+
+def sales_tabs() -> list[str]:
+    return [name for name in _tabs() if name not in {PLACEHOLDER_TAB, "Reminders"}]
+
+
+def read_payments(tab: str) -> list[list[str]]:
+    return _payment_rows(_values(tab))
+
+
+def read_log(tab: str) -> list[list[str]]:
+    return _values(tab)
+
+
+def append_rows(tab: str, rows: list[list[str]]) -> None:
+    target = urllib.parse.quote(f"'{tab}'!A1", safe="")
+    _call(
+        "POST",
+        _sheet_url(f"/values/{target}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"),
+        {"values": rows},
+    )
+
+
 def _duplicate(payments: list[list[str]], row: list[str]) -> bool:
     payment_id = row[_PAYMENT_ID].strip()
     if not payment_id:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+import mail
+import reminders
 from products import parse_product_name
 from sheet import (
     ROTTERDAM_TAB,
@@ -56,6 +59,7 @@ _quiet_health_logs()
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     _quiet_health_logs()
+    threading.Thread(target=reminders.loop, name="reminders", daemon=True).start()
     yield
 
 
@@ -302,6 +306,7 @@ def _status() -> dict:
         "ok": True,
         "sheet_configured": sheet_configured(),
         "stripe_configured": _stripe_ready(),
+        "gmail_configured": mail.configured(),
         "rotterdam_tab": ROTTERDAM_TAB,
     }
 
