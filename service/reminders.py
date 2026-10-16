@@ -29,6 +29,7 @@ from sheet import (
 
 log = logging.getLogger("sales.reminders")
 _missing_gmail_logged = False
+_disabled_logged = False
 
 _LOG_TAB = "Reminders"
 _TRACKING = "__tracking_since__"
@@ -160,7 +161,12 @@ def _tracking_since(rows: list[list[str]]) -> datetime | None:
 
 def send_due() -> int:
     """Send reminders that are due. Return how many emails were sent."""
-    global _missing_gmail_logged
+    global _missing_gmail_logged, _disabled_logged
+    if not mail.sending_enabled():
+        if not _disabled_logged:
+            log.info("reminders are off")
+            _disabled_logged = True
+        return 0
     if not mail.configured():
         if not _missing_gmail_logged:
             log.info("reminder skipped, GMAIL_ADDRESS or GMAIL_APP_PASSWORD is not set")

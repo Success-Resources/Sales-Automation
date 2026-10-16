@@ -307,6 +307,7 @@ def _status() -> dict:
         "sheet_configured": sheet_configured(),
         "stripe_configured": _stripe_ready(),
         "gmail_configured": mail.configured(),
+        "reminders_enabled": mail.sending_enabled(),
         "rotterdam_tab": ROTTERDAM_TAB,
     }
 

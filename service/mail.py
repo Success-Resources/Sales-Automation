@@ -11,6 +11,11 @@ def configured() -> bool:
     return bool(_address() and _password())
 
 
+def sending_enabled() -> bool:
+    """Reminders stay off until REMINDERS_ENABLED is set to true."""
+    return os.getenv("REMINDERS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _address() -> str:
     return os.getenv("GMAIL_ADDRESS", "").strip()
 
