@@ -38,6 +38,7 @@ _PLAN = 3
 _REMAINING = 4
 _PAID = 5
 _CURRENCY = 6
+_NAME = 7
 _EMAIL = 8
 _PAYMENT_ID = 12
 _STATUS = 13
@@ -641,21 +642,55 @@ def _summary_currency(rows: list[list[str]]) -> str:
     return max(counts, key=counts.get)
 
 
+def _person_text(value: str) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def _shares_email(row: list[str], group: list[list[str]]) -> bool:
+    email = _person_text(row[_EMAIL])
+    if not email:
+        return False
+    return any(_person_text(existing[_EMAIL]) == email for existing in group)
+
+
+def _shares_name(row: list[str], group: list[list[str]]) -> bool:
+    name = _person_text(row[_NAME])
+    if not name:
+        return False
+    return any(_person_text(existing[_NAME]) == name for existing in group)
+
+
+def _same_person(row: list[str], group: list[list[str]]) -> bool:
+    return _shares_email(row, group) or _shares_name(row, group)
+
+
 def _people(rows: list[list[str]]) -> tuple[list[list[list[str]]], list[list[list[str]]]]:
-    """Split non-refunded customers into paid in full and installment."""
-    grouped: dict[str, list[list[str]]] = {}
-    for row in rows:
-        if _is_refunded(row):
-            continue
-        key = row[_EMAIL].strip().lower() or ("id:" + row[_PAYMENT_ID].strip())
-        grouped.setdefault(key, []).append(row)
+    """Split one programme into paid in full and installment.
+
+    A later payment with the same email or the same name is the same person.
+    It is added to that person's open installment, and the amount still owed
+    falls by what they just paid. The person is paid in full only when nothing remains.
+    """
+    ordered = sorted(
+        (row for row in rows if not _is_refunded(row)),
+        key=lambda row: row[0],
+    )
     paid_full: list[list[list[str]]] = []
     installment: list[list[list[str]]] = []
-    for group in grouped.values():
-        if _owed(group) > 0.009:
-            installment.append(group)
+    for row in ordered:
+        match = next((group for group in installment if _same_person(row, group)), None)
+        if match is not None:
+            installment.remove(match)
+            combined = match + [row]
+            if _owed(combined) <= 0.009:
+                paid_full.append(combined)
+            else:
+                installment.append(combined)
+            continue
+        if _owed([row]) > 0.009:
+            installment.append([row])
         else:
-            paid_full.append(group)
+            paid_full.append([row])
     return paid_full, installment
 
 
