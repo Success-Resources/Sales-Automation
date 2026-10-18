@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from sheet import (
     mark_refunded,
     paid_at,
     record_payment,
+    refresh_summary,
 )
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -56,10 +58,19 @@ def _quiet_health_logs() -> None:
 _quiet_health_logs()
 
 
+def _refresh_summary_later() -> None:
+    time.sleep(5)
+    try:
+        refresh_summary()
+    except Exception:
+        log.exception("sales summary refresh failed")
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     _quiet_health_logs()
     threading.Thread(target=reminders.loop, name="reminders", daemon=True).start()
+    threading.Thread(target=_refresh_summary_later, name="sales-summary", daemon=True).start()
     yield
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import urllib.error
@@ -43,7 +44,26 @@ _STATUS = 13
 _COLUMNS = len(HEADERS)
 _GAP = 3
 PLACEHOLDER_TAB = "SR Event Sales"
+SUMMARY_TAB = "Sales summary"
 ROTTERDAM_TAB = "MMI2610ROT"
+_SUMMARY_HEADERS = [
+    "",
+    "Number of sales",
+    "Revenue",
+    "On-site collection",
+    "To be collected",
+]
+# label, keyword used to match payment rows, fill, font
+_SUMMARY_PROGRAMMES = (
+    ("Quantum Leap", "quantumleap", "D9D9D9", "000000"),
+    ("Guerrilla Business Intensive", "guerrillabusiness", "274E13", "FFFFFF"),
+    ("Never Work Again", "neverworkagain", "D9D2E9", "000000"),
+    ("Enlightened Warrior Camp", "enlightenedwarrior", "990000", "FFFFFF"),
+    ("Train the Trainer", "trainthetrainer", "FF9900", "000000"),
+)
+_TOTAL_FILL = "A64D79"
+_TOTAL_FONT = "FFFFFF"
+_SKIP_TABS = {PLACEHOLDER_TAB, "Reminders", SUMMARY_TAB}
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # title, keyword, exact short name, fill, font
@@ -80,6 +100,7 @@ def _sheet_id() -> str:
 
 
 _SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
+log = logging.getLogger("sales")
 _creds = None
 
 
@@ -445,6 +466,7 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     clear_at = urllib.parse.quote(f"'{tab}'!A{len(values) + 1}:Q", safe="")
     _call("POST", _sheet_url(f"/values/{clear_at}:clear"), {})
     _batch(_paint(sheet_id, len(values), blocks))
+    refresh_summary()
 
 
 def prepare_tab(tab: str) -> None:
@@ -463,7 +485,7 @@ def ensure_log_tab(tab: str) -> None:
 
 
 def sales_tabs() -> list[str]:
-    return [name for name in _tabs() if name not in {PLACEHOLDER_TAB, "Reminders"}]
+    return [name for name in _tabs() if name not in _SKIP_TABS]
 
 
 def read_payments(tab: str) -> list[list[str]]:
@@ -519,7 +541,7 @@ def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:
 def mark_refunded(payment_intent: str) -> str:
     if not payment_intent:
         return "no_payment_intent"
-    for tab in _tabs():
+    for tab in sales_tabs():
         payments = _payment_rows(_values(tab))
         for index, existing in enumerate(payments):
             if existing[_PAYMENT_ID] == payment_intent:
@@ -568,6 +590,318 @@ def _normalize_payment(row: list[str]) -> None:
         return
     total = paid + remaining
     row[_PRICE] = f"{total:.2f}" if "." in row[_PAID] or "." in remaining_text else str(int(round(total)))
+
+
+def _format_amount(amount: float, currency: str) -> str:
+    zero = {
+        "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga",
+        "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+    }
+    if (currency or "").lower() in zero:
+        return str(int(round(amount)))
+    return f"{amount:.2f}"
+
+
+def _owed(rows: list[list[str]]) -> float:
+    """What one customer's non-refunded rows still leave unpaid."""
+    price = max((_money(row[_PRICE]) or 0) for row in rows)
+    paid = sum(_money(row[_PAID]) or 0 for row in rows)
+    if price <= 0:
+        for row in rows:
+            if row[_PLAN].strip() != "installment" or "." not in row[_REMAINING]:
+                continue
+            remaining = _money(row[_REMAINING])
+            amount = _money(row[_PAID])
+            if remaining is None or amount is None:
+                continue
+            price = max(price, amount + remaining)
+    return max(0.0, price - paid)
+
+
+def _summary_currency(rows: list[list[str]]) -> str:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if _is_refunded(row):
+            continue
+        code = row[_CURRENCY].strip().upper()
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    if not counts:
+        return ""
+    return max(counts, key=counts.get)
+
+
+def _people(rows: list[list[str]]) -> tuple[list[list[list[str]]], list[list[list[str]]]]:
+    """Split non-refunded customers into paid in full and installment."""
+    grouped: dict[str, list[list[str]]] = {}
+    for row in rows:
+        if _is_refunded(row):
+            continue
+        key = row[_EMAIL].strip().lower() or ("id:" + row[_PAYMENT_ID].strip())
+        grouped.setdefault(key, []).append(row)
+    paid_full: list[list[list[str]]] = []
+    installment: list[list[list[str]]] = []
+    for group in grouped.values():
+        if _owed(group) > 0.009:
+            installment.append(group)
+        else:
+            paid_full.append(group)
+    return paid_full, installment
+
+
+def _metrics(groups: list[list[list[str]]]) -> tuple[int, float, float, float]:
+    """Sales count, revenue, on-site collection, and amount still to collect."""
+    revenue = 0.0
+    onsite = 0.0
+    due = 0.0
+    for group in groups:
+        paid = sum(_money(row[_PAID]) or 0 for row in group)
+        owed = _owed(group)
+        price = max((_money(row[_PRICE]) or 0) for row in group)
+        onsite += paid
+        due += owed
+        revenue += price if price > 0 else paid + owed
+    return len(groups), revenue, onsite, due
+
+
+def _add_metrics(
+    left: tuple[int, float, float, float], right: tuple[int, float, float, float]
+) -> tuple[int, float, float, float]:
+    return (
+        left[0] + right[0],
+        left[1] + right[1],
+        left[2] + right[2],
+        left[3] + right[3],
+    )
+
+
+def _summary_line(label: str, metrics: tuple[int, float, float, float], currency: str) -> list[str]:
+    sales, revenue, onsite, due = metrics
+    return [
+        label,
+        str(sales),
+        _format_amount(revenue, currency),
+        _format_amount(onsite, currency),
+        _format_amount(due, currency),
+    ]
+
+
+def _matches_programme(programme: str, keyword: str) -> bool:
+    key = _programme_key(programme)
+    return bool(key) and keyword in key
+
+
+def summary_values(
+    by_tab: dict[str, list[list[str]]], usd_per_unit: dict[str, float] | None = None
+) -> tuple[list[list[str]], list[str]]:
+    """Sales summary: three blank rows, then one block per programme, then total and USD."""
+    rows_by_programme: dict[str, list[list[str]]] = {keyword: [] for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES}
+    for rows in by_tab.values():
+        for row in rows:
+            for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES:
+                if _matches_programme(row[_PROGRAMME], keyword):
+                    rows_by_programme[keyword].append(row)
+                    break
+
+    values: list[list[str]] = [[""] * len(_SUMMARY_HEADERS) for _ in range(3)]
+    kinds = ["blank", "blank", "blank"]
+    values.append(["Sales summary"] + [""] * (len(_SUMMARY_HEADERS) - 1))
+    kinds.append("title")
+    values.append(list(_SUMMARY_HEADERS))
+    kinds.append("header")
+
+    total = (0, 0.0, 0.0, 0.0)
+    total_currency = ""
+    usd_revenue = 0.0
+    usd_onsite = 0.0
+    usd_due = 0.0
+    usd_known = True
+    rates = usd_per_unit or {}
+    for label, keyword, _fill, _font in _SUMMARY_PROGRAMMES:
+        programme_rows = rows_by_programme[keyword]
+        currency = _summary_currency(programme_rows)
+        paid_full, installment = _people(programme_rows)
+        full_metrics = _metrics(paid_full)
+        installment_metrics = _metrics(installment)
+        combined = _add_metrics(full_metrics, installment_metrics)
+        total = _add_metrics(total, combined)
+        if combined[0] and not total_currency:
+            total_currency = currency
+        rate = rates.get(currency) if currency else None
+        if currency == "USD":
+            rate = 1.0
+        if combined[0] and rate is None:
+            usd_known = False
+        elif rate is not None:
+            usd_revenue += combined[1] * rate
+            usd_onsite += combined[2] * rate
+            usd_due += combined[3] * rate
+        values.append(_summary_line(label, combined, currency))
+        kinds.append("programme")
+        values.append(_summary_line("paid in full", full_metrics, currency))
+        kinds.append("detail")
+        values.append(_summary_line("installment", installment_metrics, currency))
+        kinds.append("detail")
+
+    if not total_currency:
+        for rows in rows_by_programme.values():
+            total_currency = _summary_currency(rows)
+            if total_currency:
+                break
+    values.append(_summary_line("total", total, total_currency))
+    kinds.append("total")
+    if usd_known:
+        usd_metrics = (total[0], usd_revenue, usd_onsite, usd_due)
+        values.append(_summary_line("sales event (USD)", usd_metrics, "USD"))
+    else:
+        values.append(["sales event (USD)", str(total[0]), "", "", ""])
+    kinds.append("usd")
+    return values, kinds
+
+
+def _usd_per_unit(currencies: set[str]) -> dict[str, float]:
+    rates: dict[str, float] = {}
+    for code in currencies:
+        if not code or code == "USD":
+            rates[code] = 1.0
+            continue
+        url = f"https://api.frankfurter.app/latest?from={urllib.parse.quote(code)}&to=USD"
+        request = urllib.request.Request(url, headers={"User-Agent": "sr-event-sales"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode())
+            rates[code] = float(payload["rates"]["USD"])
+        except (urllib.error.URLError, TimeoutError, KeyError, TypeError, ValueError):
+            continue
+    return rates
+
+
+def refresh_summary() -> None:
+    """Rebuild the Sales summary tab from every event tab. Does not change payment rows."""
+    if not configured():
+        return
+    _ensure_tab_exists(SUMMARY_TAB)
+    by_tab = {tab: read_payments(tab) for tab in sales_tabs()}
+    for rows in by_tab.values():
+        for row in rows:
+            _normalize_payment(row)
+    currencies = {
+        row[_CURRENCY].strip().upper()
+        for rows in by_tab.values()
+        for row in rows
+        if row[_CURRENCY].strip()
+    }
+    values, kinds = summary_values(by_tab, _usd_per_unit(currencies))
+    target = urllib.parse.quote(f"'{SUMMARY_TAB}'!A1", safe="")
+    _call(
+        "PUT",
+        _sheet_url(f"/values/{target}?valueInputOption=RAW"),
+        {"values": values},
+    )
+    clear_at = urllib.parse.quote(f"'{SUMMARY_TAB}'!A{len(values) + 1}:E", safe="")
+    _call("POST", _sheet_url(f"/values/{clear_at}:clear"), {})
+    sheet_id = _tabs()[SUMMARY_TAB]
+    _batch(_paint_summary(sheet_id, values, kinds))
+    log.info("sales summary refreshed")
+
+
+def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str]) -> list[dict]:
+    width = len(_SUMMARY_HEADERS)
+    clear_until = max(len(values) + 15, 40)
+    span = {
+        "sheetId": sheet_id,
+        "startRowIndex": 0,
+        "endRowIndex": clear_until,
+        "startColumnIndex": 0,
+        "endColumnIndex": width,
+    }
+    requests: list[dict] = [
+        {"unmergeCells": {"range": span}},
+        {
+            "repeatCell": {
+                "range": span,
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": _WHITE,
+                        "horizontalAlignment": "LEFT",
+                        "textFormat": {"foregroundColor": _BLACK, "bold": False, "fontSize": 10},
+                    }
+                },
+                "fields": (
+                    "userEnteredFormat.backgroundColor,"
+                    "userEnteredFormat.horizontalAlignment,"
+                    "userEnteredFormat.textFormat.foregroundColor,"
+                    "userEnteredFormat.textFormat.bold,"
+                    "userEnteredFormat.textFormat.fontSize"
+                ),
+            }
+        },
+    ]
+    fills = {
+        label: (fill, font)
+        for label, _keyword, fill, font in _SUMMARY_PROGRAMMES
+    }
+    for index, kind in enumerate(kinds):
+        label = values[index][0] if values[index] else ""
+        if kind == "title":
+            requests.append(
+                {
+                    "mergeCells": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": index,
+                            "endRowIndex": index + 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": width,
+                        },
+                        "mergeType": "MERGE_ALL",
+                    }
+                }
+            )
+            fill, font, size, align = "FFFFFF", "000000", 14, "CENTER"
+            bold = True
+        elif kind == "header":
+            fill, font, size, align = "FFFFFF", "000000", 10, "LEFT"
+            bold = True
+        elif kind == "programme" and label in fills:
+            fill, font = fills[label]
+            size, align, bold = 10, "LEFT", True
+        elif kind == "total":
+            fill, font, size, align, bold = _TOTAL_FILL, _TOTAL_FONT, 10, "LEFT", True
+        else:
+            continue
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": index,
+                        "endRowIndex": index + 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": width,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": _rgb(fill),
+                            "horizontalAlignment": align,
+                            "textFormat": {
+                                "foregroundColor": _rgb(font),
+                                "bold": bold,
+                                "fontSize": size,
+                            },
+                        }
+                    },
+                    "fields": (
+                        "userEnteredFormat.backgroundColor,"
+                        "userEnteredFormat.horizontalAlignment,"
+                        "userEnteredFormat.textFormat.foregroundColor,"
+                        "userEnteredFormat.textFormat.bold,"
+                        "userEnteredFormat.textFormat.fontSize"
+                    ),
+                }
+            }
+        )
+    return requests
 
 
 def amount_major(cents: int, currency: str) -> str:
