@@ -65,16 +65,7 @@ _SUMMARY_PROGRAMMES = (
 )
 _TOTAL_FILL = "A64D79"
 _TOTAL_FONT = "FFFFFF"
-# Same block as the L2 Preliminary tab: products, then programmes, then a payment-type summary.
-_PRELIM_PRODUCTS = (
-    "Ticket Sale",
-    "Ticket Upgrade",
-    "SpeedWealth Book",
-    "Wristband Replacement",
-    "Workbook Replacement",
-    "Meal with Trainer (Saturday)",
-    "Meal with Trainer (Sunday)",
-)
+# Programme lines on the L2 preliminary report. Product rows, deposits, and pending sales are omitted.
 _PRELIM_PROGRAMMES = (
     ("Quantum Leap", "quantumleap"),
     ("Train the Trainer", "trainthetrainer"),
@@ -939,10 +930,8 @@ def preliminary_values(tab: str, payments: list[list[str]]) -> tuple[list[list[s
     """L2 preliminary report for one event. The caller leaves three blank rows above it.
 
     Venue, attendance, and lead trainer are left blank: this sheet does not record them.
-    Deposit and pending stay at zero. A payment is full or an installment.
-    Speed Wealth Book is a product line. The other programmes are listed under Programs.
+    The report lists programme names with Full Payment and Installment only.
     """
-    speed_wealth = [row for row in payments if is_speed_wealth(row[_PROGRAMME])]
     by_programme = {keyword: [] for _label, keyword in _PRELIM_PROGRAMMES}
     for row in payments:
         if is_speed_wealth(row[_PROGRAMME]):
@@ -966,19 +955,6 @@ def preliminary_values(tab: str, payments: list[list[str]]) -> tuple[list[list[s
     for label in ("Attendance (Max):", "Attendance (Average):", "Attendance (Minimum):"):
         add(_prelim_side(label), "attendance")
     add(_prelim_side("Lead Trainer:"), "trainer")
-    add(_prelim_cells("Products", "Quantity", "Amount", "Paid", "Balance"), "header")
-
-    product_total = zero
-    for label in _PRELIM_PRODUCTS:
-        if label == "SpeedWealth Book":
-            paid_full, installment = _people(speed_wealth)
-            metrics = _add_metrics(_metrics(paid_full), _metrics(installment))
-        else:
-            metrics = zero
-        product_total = _add_metrics(product_total, metrics)
-        add(_prelim_line(label, metrics, currency), "product")
-    add(_prelim_line("Grand Total", product_total, currency), "product_total")
-    add(_pad([""]), "separator")
     add(_prelim_cells("Programs", "Quantity", "Amount", "Paid", "Balance"), "header")
 
     full_total = zero
@@ -994,18 +970,14 @@ def preliminary_values(tab: str, payments: list[list[str]]) -> tuple[list[list[s
         programme_total = _add_metrics(programme_total, combined)
         add(_prelim_line(label, combined, currency), "programme")
         add(_prelim_line("Full Payment", full_metrics, currency), "detail")
-        add(_prelim_line("Deposit", zero, currency), "detail")
         add(_prelim_line("Installment", installment_metrics, currency), "detail")
-        add(_prelim_line("Pending Sales", zero, currency), "detail")
     add(_prelim_line("Grand Total", programme_total, currency), "grand")
     add(_pad([""]), "separator")
     add(_prelim_cells("Summary", "Total Quantity", "Total Amount", "Total Paid", "Total Balance"), "header")
     add(_prelim_line("Full Payment", full_total, currency), "detail")
-    add(_prelim_line("Deposit", zero, currency), "detail")
     add(_prelim_line("Installment", installment_total, currency), "detail")
     confirmed = _add_metrics(full_total, installment_total)
     add(_prelim_line("Confirmed Sales", confirmed, currency), "confirmed")
-    add(_prelim_line("Pending Sales", zero, currency), "detail")
     add(_prelim_line("Total Sales", confirmed, currency), "total")
     return values, kinds
 
