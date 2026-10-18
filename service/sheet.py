@@ -49,6 +49,7 @@ SUMMARY_TAB = "Sales summary"
 ROTTERDAM_TAB = "MMI2610ROT"
 _SUMMARY_HEADERS = [
     "",
+    "selling price",
     "Number of sales",
     "Revenue",
     "On-site collection",
@@ -720,13 +721,31 @@ def _add_metrics(
     )
 
 
-def _summary_line(label: str, metrics: tuple[int, float, float, float], currency: str) -> list[str]:
+def _selling_price(rows: list[list[str]]) -> str:
+    """Programme price shown in the sales summary. Empty when no price was recorded."""
+    price = max((_money(row[_PRICE]) or 0 for row in rows if not _is_refunded(row)), default=0)
+    if price <= 0:
+        return ""
+    return _format_amount(price, _summary_currency(rows))
+
+
+def _summary_line(
+    label: str,
+    metrics: tuple[int, float, float, float],
+    currency: str,
+    selling_price: str = "",
+    euro: bool = True,
+) -> list[str]:
     sales, revenue, onsite, due = metrics
+    collected = _format_amount(onsite, currency)
+    if euro and collected:
+        collected = f"€{collected}"
     return [
         label,
+        selling_price,
         str(sales),
         _format_amount(revenue, currency),
-        _format_amount(onsite, currency),
+        collected,
         _format_amount(due, currency),
     ]
 
@@ -779,11 +798,12 @@ def summary_values(
             usd_revenue += combined[1] * rate
             usd_onsite += combined[2] * rate
             usd_due += combined[3] * rate
-        values.append(_summary_line(label, combined, currency))
+        price = _selling_price(programme_rows)
+        values.append(_summary_line(label, combined, currency, price))
         kinds.append("programme")
-        values.append(_summary_line("paid in full", full_metrics, currency))
+        values.append(_summary_line("paid in full", full_metrics, currency, price))
         kinds.append("detail")
-        values.append(_summary_line("installment", installment_metrics, currency))
+        values.append(_summary_line("installment", installment_metrics, currency, price))
         kinds.append("detail")
 
     if not total_currency:
@@ -795,9 +815,9 @@ def summary_values(
     kinds.append("total")
     if usd_known:
         usd_metrics = (total[0], usd_revenue, usd_onsite, usd_due)
-        values.append(_summary_line("sales event (USD)", usd_metrics, "USD"))
+        values.append(_summary_line("sales event (USD)", usd_metrics, "USD", euro=False))
     else:
-        values.append(["sales event (USD)", str(total[0]), "", "", ""])
+        values.append(["sales event (USD)", "", str(total[0]), "", "", ""])
     kinds.append("usd")
     return values, kinds
 
