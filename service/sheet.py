@@ -223,10 +223,17 @@ def _is_title(row: list[str]) -> bool:
 
 def _payment_rows(rows: list[list]) -> list[list[str]]:
     payments = []
+    skip_summary = False
     for raw in rows:
         row = _pad(raw)
         if row[0].strip() == "Sales summary":
-            break
+            skip_summary = True
+            continue
+        if skip_summary:
+            if _is_title(row):
+                skip_summary = False
+            else:
+                continue
         if _is_blank(row) or _is_header(row) or _is_title(row):
             continue
         payments.append(row)
@@ -257,7 +264,7 @@ def _is_refunded(row: list[str]) -> bool:
     return row[_STATUS].strip().lower() == "refunded"
 
 
-def _layout(payments: list[list[str]]) -> tuple[list[list[str]], list[tuple[int, int, str, str]]]:
+def _layout(payments: list[list[str]], include_tail: bool = True) -> tuple[list[list[str]], list[tuple[int, int, str, str]], list[list[str]], list[list[str]]]:
     grouped: list[list[list[str]]] = [[] for _ in _SECTIONS]
     refunded: list[list[str]] = []
     other: list[list[str]] = []
@@ -271,11 +278,14 @@ def _layout(payments: list[list[str]]) -> tuple[list[list[str]], list[tuple[int,
         else:
             grouped[section].append(row)
 
-    sections = list(_SECTIONS) + [("Refunded", "", "", _REFUNDED_FILL, "000000")]
-    buckets = grouped + [refunded]
-    if other:
-        sections = sections + [("Other", "", "", "FFFFFF", "000000")]
-        buckets = buckets + [other]
+    sections = list(_SECTIONS)
+    buckets = grouped
+    if include_tail:
+        sections = sections + [("Refunded", "", "", _REFUNDED_FILL, "000000")]
+        buckets = buckets + [refunded]
+        if other:
+            sections = sections + [("Other", "", "", "FFFFFF", "000000")]
+            buckets = buckets + [other]
 
     values: list[list[str]] = []
     blocks: list[tuple[int, int, str, str]] = []
@@ -287,7 +297,25 @@ def _layout(payments: list[list[str]]) -> tuple[list[list[str]], list[tuple[int,
         values.append(list(HEADERS))
         values.extend(bucket)
         blocks.append((start, len(values), fill, font))
-    return values, blocks
+    return values, blocks, refunded, other
+
+
+def _append_block(
+    values: list[list[str]],
+    blocks: list[tuple[int, int, str, str]],
+    title: str,
+    rows: list[list[str]],
+    fill: str,
+    font: str,
+    gap: bool,
+) -> None:
+    if gap:
+        values.extend(_pad([]) for _ in range(_GAP))
+    start = len(values)
+    values.append(_pad([title]))
+    values.append(list(HEADERS))
+    values.extend(rows)
+    blocks.append((start, len(values), fill, font))
 
 
 def _paint(sheet_id: int, height: int, blocks: list[tuple[int, int, str, str]]) -> list[dict]:
@@ -460,7 +488,7 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
         payments = _payment_rows(_values(tab))
     for row in payments:
         _normalize_payment(row)
-    values, blocks = _layout(payments)
+    values, blocks, refunded, other = _layout(payments, include_tail=tab != ROTTERDAM_TAB)
     extra_paint: list[dict] = []
     if tab == ROTTERDAM_TAB:
         _delete_summary_tab()
@@ -469,6 +497,10 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
         summary_at = len(values) + _GAP
         values.extend(_pad([]) for _ in range(_GAP))
         values.extend(_pad(row) for row in summary_rows)
+        values.extend(_pad([]) for _ in range(_GAP))
+        _append_block(values, blocks, "Refunded", refunded, _REFUNDED_FILL, "000000", gap=False)
+        if other:
+            _append_block(values, blocks, "Other", other, "FFFFFF", "000000", gap=True)
         extra_paint = _paint_summary(sheet_id, summary_rows, kinds, summary_at)
     target = urllib.parse.quote(f"'{tab}'!A1", safe="")
     _call(
@@ -610,8 +642,8 @@ def _format_amount(amount: float, currency: str) -> str:
         "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
     }
     if (currency or "").lower() in zero:
-        return str(int(round(amount)))
-    return f"{amount:.2f}"
+        return f"{int(round(amount)):,}"
+    return f"{amount:,.2f}"
 
 
 def _owed(rows: list[list[str]]) -> float:
@@ -734,19 +766,21 @@ def _summary_line(
     metrics: tuple[int, float, float, float],
     currency: str,
     selling_price: str = "",
-    euro: bool = True,
+    symbol: str = "€",
 ) -> list[str]:
     sales, revenue, onsite, due = metrics
-    collected = _format_amount(onsite, currency)
-    if euro and collected:
-        collected = f"€{collected}"
+
+    def marked(amount: float) -> str:
+        text = _format_amount(amount, currency)
+        return f"{symbol}{text}" if symbol and text else text
+
     return [
         label,
         selling_price,
-        str(sales),
-        _format_amount(revenue, currency),
-        collected,
-        _format_amount(due, currency),
+        f"{sales:,}",
+        marked(revenue),
+        marked(onsite),
+        marked(due),
     ]
 
 
@@ -815,9 +849,9 @@ def summary_values(
     kinds.append("total")
     if usd_known:
         usd_metrics = (total[0], usd_revenue, usd_onsite, usd_due)
-        values.append(_summary_line("sales event (USD)", usd_metrics, "USD", euro=False))
+        values.append(_summary_line("total sales at event (USD)", usd_metrics, "USD", symbol="$"))
     else:
-        values.append(["sales event (USD)", "", str(total[0]), "", "", ""])
+        values.append(["total sales at event (USD)", "", f"{total[0]:,}", "", "", ""])
     kinds.append("usd")
     return values, kinds
 
