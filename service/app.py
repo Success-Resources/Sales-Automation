@@ -25,11 +25,13 @@ from sheet import (
     ROTTERDAM_TAB,
     amount_major,
     configured as sheet_configured,
+    is_quantum_leap,
     is_speed_wealth,
     mark_refunded,
     paid_at,
     record_payment,
     refresh_summary,
+    set_ql_price_lookup,
 )
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -135,6 +137,46 @@ def _programme_price_cents(price) -> int | None:
     return int(unit)
 
 
+def _highest_price_cents(product_id: str, currency: str) -> int | None:
+    """Highest active price on a Stripe product, in minor units."""
+    if not product_id:
+        return None
+    secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not secret:
+        return None
+    stripe.api_key = secret
+    kwargs = {"product": product_id, "active": True, "limit": 100}
+    if currency:
+        kwargs["currency"] = currency.lower()
+    highest = None
+    for price in stripe.Price.list(**kwargs).auto_paging_iter():
+        cents = _programme_price_cents(price)
+        if cents is None:
+            continue
+        if highest is None or cents > highest:
+            highest = cents
+    return highest
+
+
+def _use_highest_ql_price(
+    programme: str,
+    product_id: str,
+    currency: str,
+    preset: int | None,
+    price_cents: int | None,
+) -> tuple[int | None, int | None]:
+    """Quantum Leap has a lower price and a higher one. The sheet uses the higher one."""
+    if not is_quantum_leap(programme):
+        return preset, price_cents
+    highest = _highest_price_cents(product_id, currency)
+    if not highest:
+        return preset, price_cents
+    return highest, highest
+
+
+set_ql_price_lookup(_highest_price_cents)
+
+
 def _plan_for(
     programme: str,
     paid_cents: int,
@@ -237,6 +279,7 @@ def _from_checkout(session: dict, event: dict) -> tuple[str, list[str]] | None:
         # A Stripe subscription's first invoice is recorded from invoice.paid, not here.
         log.info("checkout subscription deferred to invoice.paid session=%s", session.get("id"))
         return None
+    preset, price_cents = _use_highest_ql_price(programme, product_id, currency, preset, price_cents)
     plan, remaining, programme_price = _plan_for(programme, paid, preset, price_cents, currency, subscription)
     log.info(
         "checkout plan=%s price=%s preset=%s paid=%s remaining=%s",
@@ -279,6 +322,7 @@ def _from_invoice(invoice: dict, event: dict) -> tuple[str, list[str]] | None:
     subscription_id = _id(loaded.get("subscription"))
     paid = int(loaded.get("amount_paid") or 0)
     currency = str(loaded.get("currency") or "")
+    preset, price_cents = _use_highest_ql_price(programme, product_id, currency, preset, price_cents)
     plan, remaining, programme_price = _plan_for(
         programme, paid, preset, price_cents, currency, bool(subscription_id)
     )

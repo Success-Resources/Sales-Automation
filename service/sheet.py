@@ -41,6 +41,7 @@ _PAID = 5
 _CURRENCY = 6
 _NAME = 7
 _EMAIL = 8
+_PRODUCT_ID = 11
 _PAYMENT_ID = 12
 _STATUS = 13
 _TRANSFERRED = 14
@@ -260,6 +261,62 @@ def is_speed_wealth(programme: str) -> bool:
     """Speed Wealth Book is sold in full only."""
     key = _programme_key(programme)
     return "speedwealth" in key or key == "swb"
+
+
+def is_quantum_leap(programme: str) -> bool:
+    key = _programme_key(programme)
+    return "quantumleap" in key
+
+
+_ql_price_lookup = None
+
+
+def set_ql_price_lookup(lookup) -> None:
+    """Register how to ask Stripe for the highest Quantum Leap price, in minor units."""
+    global _ql_price_lookup
+    _ql_price_lookup = lookup
+
+
+def _apply_highest_ql_price(payments: list[list[str]]) -> None:
+    """Store the highest Quantum Leap price on each Quantum Leap payment row.
+
+    Summary and the preliminary report read this column. Other programmes are left alone.
+    """
+    if _ql_price_lookup is None:
+        return
+    cache: dict[tuple[str, str], int | None] = {}
+    for row in payments:
+        if _is_refunded(row) or not is_quantum_leap(row[_PROGRAMME]):
+            continue
+        product_id = row[_PRODUCT_ID].strip()
+        currency = row[_CURRENCY].strip()
+        key = (product_id, currency.upper())
+        if key not in cache:
+            try:
+                cache[key] = _ql_price_lookup(product_id, currency) if product_id else None
+            except Exception:
+                log.exception("quantum leap price lookup failed product=%s", product_id)
+                cache[key] = None
+        cents = cache[key]
+        if not cents or cents <= 0:
+            continue
+        full_text = amount_major(cents, currency)
+        full = _money(full_text) or 0
+        paid = _money(row[_PAID]) or 0
+        row[_PRICE] = _group_digits(full_text)
+        if paid + 0.009 >= full:
+            row[_PLAN] = "full"
+            row[_REMAINING] = _group_digits(amount_major(0, currency))
+            continue
+        row[_PLAN] = "installment"
+        if (currency or "").lower() in {
+            "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga",
+            "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+        }:
+            remaining_cents = int(round(full - paid))
+        else:
+            remaining_cents = int(round((full - paid) * 100))
+        row[_REMAINING] = _group_digits(amount_major(remaining_cents, currency))
 
 
 def _section_for(programme: str) -> int | None:
@@ -571,6 +628,7 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     for row in payments:
         _normalize_payment(row)
     _mark_ql_transfers(payments)
+    _apply_highest_ql_price(payments)
     values, blocks, refunded, other = _layout(payments, include_tail=tab != ROTTERDAM_TAB)
     extra_paint: list[dict] = []
     if tab == ROTTERDAM_TAB:
