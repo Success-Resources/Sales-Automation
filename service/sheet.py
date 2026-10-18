@@ -65,6 +65,24 @@ _SUMMARY_PROGRAMMES = (
 )
 _TOTAL_FILL = "A64D79"
 _TOTAL_FONT = "FFFFFF"
+# Same block as the L2 Preliminary tab: products, then programmes, then a payment-type summary.
+_PRELIM_PRODUCTS = (
+    "Ticket Sale",
+    "Ticket Upgrade",
+    "SpeedWealth Book",
+    "Wristband Replacement",
+    "Workbook Replacement",
+    "Meal with Trainer (Saturday)",
+    "Meal with Trainer (Sunday)",
+)
+_PRELIM_PROGRAMMES = (
+    ("Quantum Leap", "quantumleap"),
+    ("Train the Trainer", "trainthetrainer"),
+    ("Enlightened Warrior Camp", "enlightenedwarrior"),
+    ("Guerrilla Business Intensive", "guerrillabusiness"),
+    ("Never Work Again", "neverworkagain"),
+)
+_PRELIM_END = 7
 _SKIP_TABS = {PLACEHOLDER_TAB, "Reminders", SUMMARY_TAB}
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -226,7 +244,7 @@ def _payment_rows(rows: list[list]) -> list[list[str]]:
     skip_summary = False
     for raw in rows:
         row = _pad(raw)
-        if row[0].strip() == "Sales summary":
+        if row[0].strip() == "Sales summary" or "L2 Preliminary Sales Report" in row[0]:
             skip_summary = True
             continue
         if skip_summary:
@@ -514,11 +532,17 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
         summary_at = len(values) + _GAP
         values.extend(_pad([]) for _ in range(_GAP))
         values.extend(_pad(row) for row in summary_rows)
+        prelim_rows, prelim_kinds = preliminary_values(tab, payments)
+        prelim_at = len(values) + _GAP
+        values.extend(_pad([]) for _ in range(_GAP))
+        values.extend(prelim_rows)
         values.extend(_pad([]) for _ in range(_GAP))
         _append_block(values, blocks, "Refunded", refunded, _REFUNDED_FILL, "000000", gap=False)
         if other:
             _append_block(values, blocks, "Other", other, "FFFFFF", "000000", gap=True)
-        extra_paint = _paint_summary(sheet_id, summary_rows, kinds, summary_at)
+        extra_paint = _paint_summary(sheet_id, summary_rows, kinds, summary_at) + _paint_preliminary(
+            sheet_id, prelim_kinds, prelim_at
+        )
     target = urllib.parse.quote(f"'{tab}'!A1", safe="")
     _call(
         "PUT",
@@ -886,6 +910,106 @@ def summary_values(
     return values, kinds
 
 
+def _euro(amount: float, currency: str) -> str:
+    return f"€{_format_amount(amount, currency)}"
+
+
+def _prelim_cells(
+    label: str,
+    quantity: str = "",
+    amount: str = "",
+    paid: str = "",
+    balance: str = "",
+) -> list[str]:
+    """Label in A–C, then quantity, amount, paid, and balance."""
+    return _pad([label, "", "", quantity, amount, paid, balance])
+
+
+def _prelim_side(label: str, value: str = "") -> list[str]:
+    """Attendance and trainer sit on the right, as on the L2 example."""
+    return _pad(["", "", "", "", "", label, value])
+
+
+def _prelim_line(label: str, metrics: tuple[int, float, float, float], currency: str) -> list[str]:
+    sales, revenue, onsite, due = metrics
+    return _prelim_cells(label, f"{sales:,}", _euro(revenue, currency), _euro(onsite, currency), _euro(due, currency))
+
+
+def preliminary_values(tab: str, payments: list[list[str]]) -> tuple[list[list[str]], list[str]]:
+    """L2 preliminary report for one event. The caller leaves three blank rows above it.
+
+    Venue, attendance, and lead trainer are left blank: this sheet does not record them.
+    Deposit and pending stay at zero. A payment is full or an installment.
+    Speed Wealth Book is a product line. The other programmes are listed under Programs.
+    """
+    speed_wealth = [row for row in payments if is_speed_wealth(row[_PROGRAMME])]
+    by_programme = {keyword: [] for _label, keyword in _PRELIM_PROGRAMMES}
+    for row in payments:
+        if is_speed_wealth(row[_PROGRAMME]):
+            continue
+        for _label, keyword in _PRELIM_PROGRAMMES:
+            if _matches_programme(row[_PROGRAMME], keyword):
+                by_programme[keyword].append(row)
+                break
+
+    currency = _summary_currency(payments) or "EUR"
+    zero = (0, 0.0, 0.0, 0.0)
+    values: list[list[str]] = []
+    kinds: list[str] = []
+
+    def add(row: list[str], kind: str) -> None:
+        values.append(row)
+        kinds.append(kind)
+
+    add(_pad([f"{tab} L2 Preliminary Sales Report"]), "title")
+    add(_pad([""]), "venue")
+    for label in ("Attendance (Max):", "Attendance (Average):", "Attendance (Minimum):"):
+        add(_prelim_side(label), "attendance")
+    add(_prelim_side("Lead Trainer:"), "trainer")
+    add(_prelim_cells("Products", "Quantity", "Amount", "Paid", "Balance"), "header")
+
+    product_total = zero
+    for label in _PRELIM_PRODUCTS:
+        if label == "SpeedWealth Book":
+            paid_full, installment = _people(speed_wealth)
+            metrics = _add_metrics(_metrics(paid_full), _metrics(installment))
+        else:
+            metrics = zero
+        product_total = _add_metrics(product_total, metrics)
+        add(_prelim_line(label, metrics, currency), "product")
+    add(_prelim_line("Grand Total", product_total, currency), "product_total")
+    add(_pad([""]), "separator")
+    add(_prelim_cells("Programs", "Quantity", "Amount", "Paid", "Balance"), "header")
+
+    full_total = zero
+    installment_total = zero
+    programme_total = zero
+    for label, keyword in _PRELIM_PROGRAMMES:
+        paid_full, installment = _people(by_programme[keyword])
+        full_metrics = _metrics(paid_full)
+        installment_metrics = _metrics(installment)
+        combined = _add_metrics(full_metrics, installment_metrics)
+        full_total = _add_metrics(full_total, full_metrics)
+        installment_total = _add_metrics(installment_total, installment_metrics)
+        programme_total = _add_metrics(programme_total, combined)
+        add(_prelim_line(label, combined, currency), "programme")
+        add(_prelim_line("Full Payment", full_metrics, currency), "detail")
+        add(_prelim_line("Deposit", zero, currency), "detail")
+        add(_prelim_line("Installment", installment_metrics, currency), "detail")
+        add(_prelim_line("Pending Sales", zero, currency), "detail")
+    add(_prelim_line("Grand Total", programme_total, currency), "grand")
+    add(_pad([""]), "separator")
+    add(_prelim_cells("Summary", "Total Quantity", "Total Amount", "Total Paid", "Total Balance"), "header")
+    add(_prelim_line("Full Payment", full_total, currency), "detail")
+    add(_prelim_line("Deposit", zero, currency), "detail")
+    add(_prelim_line("Installment", installment_total, currency), "detail")
+    confirmed = _add_metrics(full_total, installment_total)
+    add(_prelim_line("Confirmed Sales", confirmed, currency), "confirmed")
+    add(_prelim_line("Pending Sales", zero, currency), "detail")
+    add(_prelim_line("Total Sales", confirmed, currency), "total")
+    return values, kinds
+
+
 def _usd_per_unit(currencies: set[str]) -> dict[str, float]:
     rates: dict[str, float] = {}
     for code in currencies:
@@ -1021,6 +1145,127 @@ def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str], sta
                     }
                 }
             )
+    return requests
+
+
+def _paint_preliminary(sheet_id: int, kinds: list[str], start: int) -> list[dict]:
+    """Style the L2 preliminary block to match the Cologne example."""
+    requests: list[dict] = []
+
+    def paint(row: int, c1: int, c2: int, fill: str, font: str, bold: bool, size: int, align: str) -> None:
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row,
+                        "endRowIndex": row + 1,
+                        "startColumnIndex": c1,
+                        "endColumnIndex": c2,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": _rgb(fill),
+                            "horizontalAlignment": align,
+                            "textFormat": {
+                                "foregroundColor": _rgb(font),
+                                "bold": bold,
+                                "fontSize": size,
+                            },
+                        }
+                    },
+                    "fields": (
+                        "userEnteredFormat.backgroundColor,"
+                        "userEnteredFormat.horizontalAlignment,"
+                        "userEnteredFormat.textFormat.foregroundColor,"
+                        "userEnteredFormat.textFormat.bold,"
+                        "userEnteredFormat.textFormat.fontSize"
+                    ),
+                }
+            }
+        )
+
+    def merge(row: int, c1: int, c2: int) -> None:
+        requests.append(
+            {
+                "mergeCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row,
+                        "endRowIndex": row + 1,
+                        "startColumnIndex": c1,
+                        "endColumnIndex": c2,
+                    },
+                    "mergeType": "MERGE_ALL",
+                }
+            }
+        )
+
+    for index, kind in enumerate(kinds):
+        row = start + index
+        if kind == "title":
+            merge(row, 0, _PRELIM_END)
+            paint(row, 0, _PRELIM_END, "FFFF00", "0000FF", True, 20, "CENTER")
+        elif kind == "venue":
+            merge(row, 0, _PRELIM_END)
+            paint(row, 0, _PRELIM_END, "FFFF00", "FF0000", True, 9, "CENTER")
+        elif kind in {"attendance", "trainer"}:
+            merge(row, 0, 5)
+            paint(row, 0, 5, "FFFFFF", "000000", False, 9, "LEFT")
+            paint(row, 5, 6, "FFFFFF", "000000", False, 9, "RIGHT")
+            paint(row, 6, 7, "FFFF00", "000000", kind == "trainer", 9, "CENTER")
+        elif kind == "separator":
+            merge(row, 0, _PRELIM_END)
+            paint(row, 0, _PRELIM_END, "000000", "FFFFFF", False, 9, "LEFT")
+        elif kind == "header":
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "CFE2F3", "000000", True, 9, "CENTER")
+        elif kind == "product_total":
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "000000", "FFFFFF", True, 9, "LEFT")
+            paint(row, 3, _PRELIM_END, "000000", "FFFFFF", True, 9, "RIGHT")
+        elif kind == "programme":
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "FCE4D6", "000000", True, 9, "LEFT")
+            paint(row, 3, _PRELIM_END, "FCE4D6", "000000", True, 9, "RIGHT")
+        elif kind == "grand":
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "CFE2F3", "000000", True, 9, "LEFT")
+            paint(row, 3, _PRELIM_END, "CFE2F3", "000000", True, 9, "RIGHT")
+        elif kind == "confirmed":
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "6D9EEB", "FFFFFF", True, 9, "LEFT")
+            paint(row, 3, _PRELIM_END, "6D9EEB", "FFFFFF", True, 9, "RIGHT")
+        elif kind == "total":
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "FFFFFF", "000000", True, 9, "LEFT")
+            paint(row, 3, _PRELIM_END, "FFFFFF", "000000", True, 9, "RIGHT")
+        else:
+            merge(row, 0, 3)
+            paint(row, 0, _PRELIM_END, "FFFFFF", "000000", False, 9, "LEFT")
+            paint(row, 3, _PRELIM_END, "FFFFFF", "000000", False, 9, "RIGHT")
+
+    if kinds:
+        border = {"style": "SOLID", "width": 1, "color": _BLACK}
+        requests.append(
+            {
+                "updateBorders": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": start,
+                        "endRowIndex": start + len(kinds),
+                        "startColumnIndex": 0,
+                        "endColumnIndex": _PRELIM_END,
+                    },
+                    "top": border,
+                    "bottom": border,
+                    "left": border,
+                    "right": border,
+                    "innerHorizontal": border,
+                    "innerVertical": border,
+                }
+            }
+        )
     return requests
 
 
