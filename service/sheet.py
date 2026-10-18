@@ -223,6 +223,8 @@ def _payment_rows(rows: list[list]) -> list[list[str]]:
     payments = []
     for raw in rows:
         row = _pad(raw)
+        if row[0].strip() == "Sales summary":
+            break
         if _is_blank(row) or _is_header(row) or _is_title(row):
             continue
         payments.append(row)
@@ -457,6 +459,15 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     for row in payments:
         _normalize_payment(row)
     values, blocks = _layout(payments)
+    extra_paint: list[dict] = []
+    if tab == ROTTERDAM_TAB:
+        _delete_summary_tab()
+        currencies = {row[_CURRENCY].strip().upper() for row in payments if row[_CURRENCY].strip()}
+        summary_rows, kinds = summary_values({tab: payments}, _usd_per_unit(currencies))
+        summary_at = len(values) + _GAP
+        values.extend(_pad([]) for _ in range(_GAP))
+        values.extend(_pad(row) for row in summary_rows)
+        extra_paint = _paint_summary(sheet_id, summary_rows, kinds, summary_at)
     target = urllib.parse.quote(f"'{tab}'!A1", safe="")
     _call(
         "PUT",
@@ -465,8 +476,7 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     )
     clear_at = urllib.parse.quote(f"'{tab}'!A{len(values) + 1}:Q", safe="")
     _call("POST", _sheet_url(f"/values/{clear_at}:clear"), {})
-    _batch(_paint(sheet_id, len(values), blocks))
-    refresh_summary()
+    _batch(_paint(sheet_id, len(values), blocks) + extra_paint)
 
 
 def prepare_tab(tab: str) -> None:
@@ -694,7 +704,7 @@ def _matches_programme(programme: str, keyword: str) -> bool:
 def summary_values(
     by_tab: dict[str, list[list[str]]], usd_per_unit: dict[str, float] | None = None
 ) -> tuple[list[list[str]], list[str]]:
-    """Sales summary: three blank rows, then one block per programme, then total and USD."""
+    """Sales summary rows for one event. The caller leaves three blank rows above this table."""
     rows_by_programme: dict[str, list[list[str]]] = {keyword: [] for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES}
     for rows in by_tab.values():
         for row in rows:
@@ -703,10 +713,8 @@ def summary_values(
                     rows_by_programme[keyword].append(row)
                     break
 
-    values: list[list[str]] = [[""] * len(_SUMMARY_HEADERS) for _ in range(3)]
-    kinds = ["blank", "blank", "blank"]
-    values.append(["Sales summary"] + [""] * (len(_SUMMARY_HEADERS) - 1))
-    kinds.append("title")
+    values: list[list[str]] = [["Sales summary"] + [""] * (len(_SUMMARY_HEADERS) - 1)]
+    kinds = ["title"]
     values.append(list(_SUMMARY_HEADERS))
     kinds.append("header")
 
@@ -776,72 +784,33 @@ def _usd_per_unit(currencies: set[str]) -> dict[str, float]:
     return rates
 
 
+def _delete_summary_tab() -> None:
+    titles = _tabs()
+    if SUMMARY_TAB not in titles:
+        return
+    _batch([{"deleteSheet": {"sheetId": titles[SUMMARY_TAB]}}])
+
+
 def refresh_summary() -> None:
-    """Rebuild the Sales summary tab from every event tab. Does not change payment rows."""
+    """Put the Sales summary on the Rotterdam tab and remove the separate tab."""
     if not configured():
         return
-    _ensure_tab_exists(SUMMARY_TAB)
-    by_tab = {tab: read_payments(tab) for tab in sales_tabs()}
-    for rows in by_tab.values():
-        for row in rows:
-            _normalize_payment(row)
-    currencies = {
-        row[_CURRENCY].strip().upper()
-        for rows in by_tab.values()
-        for row in rows
-        if row[_CURRENCY].strip()
-    }
-    values, kinds = summary_values(by_tab, _usd_per_unit(currencies))
-    target = urllib.parse.quote(f"'{SUMMARY_TAB}'!A1", safe="")
-    _call(
-        "PUT",
-        _sheet_url(f"/values/{target}?valueInputOption=RAW"),
-        {"values": values},
-    )
-    clear_at = urllib.parse.quote(f"'{SUMMARY_TAB}'!A{len(values) + 1}:E", safe="")
-    _call("POST", _sheet_url(f"/values/{clear_at}:clear"), {})
-    sheet_id = _tabs()[SUMMARY_TAB]
-    _batch(_paint_summary(sheet_id, values, kinds))
-    log.info("sales summary refreshed")
+    _delete_summary_tab()
+    if ROTTERDAM_TAB not in _tabs():
+        return
+    organize_tab(ROTTERDAM_TAB)
+    log.info("sales summary placed on %s", ROTTERDAM_TAB)
 
 
-def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str]) -> list[dict]:
+def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str], start: int) -> list[dict]:
     width = len(_SUMMARY_HEADERS)
-    clear_until = max(len(values) + 15, 40)
-    span = {
-        "sheetId": sheet_id,
-        "startRowIndex": 0,
-        "endRowIndex": clear_until,
-        "startColumnIndex": 0,
-        "endColumnIndex": width,
-    }
-    requests: list[dict] = [
-        {"unmergeCells": {"range": span}},
-        {
-            "repeatCell": {
-                "range": span,
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": _WHITE,
-                        "horizontalAlignment": "LEFT",
-                        "textFormat": {"foregroundColor": _BLACK, "bold": False, "fontSize": 10},
-                    }
-                },
-                "fields": (
-                    "userEnteredFormat.backgroundColor,"
-                    "userEnteredFormat.horizontalAlignment,"
-                    "userEnteredFormat.textFormat.foregroundColor,"
-                    "userEnteredFormat.textFormat.bold,"
-                    "userEnteredFormat.textFormat.fontSize"
-                ),
-            }
-        },
-    ]
+    requests: list[dict] = []
     fills = {
         label: (fill, font)
         for label, _keyword, fill, font in _SUMMARY_PROGRAMMES
     }
     for index, kind in enumerate(kinds):
+        row_index = start + index
         label = values[index][0] if values[index] else ""
         if kind == "title":
             requests.append(
@@ -849,8 +818,8 @@ def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str]) -> 
                     "mergeCells": {
                         "range": {
                             "sheetId": sheet_id,
-                            "startRowIndex": index,
-                            "endRowIndex": index + 1,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
                             "startColumnIndex": 0,
                             "endColumnIndex": width,
                         },
@@ -875,8 +844,8 @@ def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str]) -> 
                 "repeatCell": {
                     "range": {
                         "sheetId": sheet_id,
-                        "startRowIndex": index,
-                        "endRowIndex": index + 1,
+                        "startRowIndex": row_index,
+                        "endRowIndex": row_index + 1,
                         "startColumnIndex": 0,
                         "endColumnIndex": width,
                     },
