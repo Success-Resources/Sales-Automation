@@ -137,24 +137,101 @@ def _programme_price_cents(price) -> int | None:
     return int(unit)
 
 
+def _search_literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _fixed_onetime_cents(price) -> int | None:
+    """Fixed one-time amount. Customer-chosen and recurring prices are not a programme price."""
+    data = _as_dict(price)
+    if data.get("recurring") or str(data.get("type") or "") == "recurring":
+        return None
+    if str(data.get("type") or "one_time") != "one_time":
+        return None
+    if data.get("custom_unit_amount"):
+        return None
+    unit = data.get("unit_amount")
+    if unit is None:
+        return None
+    cents = int(unit)
+    return cents if cents > 0 else None
+
+
+def _same_quantum_leap_product(source_name: str, other_name: str) -> bool:
+    """Two Stripe products are the same Quantum Leap when the name, or the event and programme, match."""
+    left = (source_name or "").strip()
+    right = (other_name or "").strip()
+    if not left or not right:
+        return False
+    if left.casefold() == right.casefold():
+        return True
+    source = parse_product_name(left)
+    other = parse_product_name(right)
+    if source and other:
+        return source[0] == other[0] and source[1].strip().casefold() == other[1].strip().casefold() and is_quantum_leap(source[1])
+    if source and is_quantum_leap(source[1]):
+        return source[1].strip().casefold() == right.casefold()
+    if other and is_quantum_leap(other[1]):
+        return other[1].strip().casefold() == left.casefold()
+    return False
+
+
+def _ql_product_candidates(product_id: str) -> list:
+    source = _as_dict(stripe.Product.retrieve(product_id))
+    source_name = str(source.get("name") or "")
+    found = {product_id: source}
+    try:
+        listed = stripe.Product.search(
+            query=f"active:'true' AND name~{_search_literal('Quantum Leap')}",
+            limit=100,
+        )
+        for product in listed.auto_paging_iter():
+            data = _as_dict(product)
+            other_id = str(data.get("id") or "")
+            if not other_id or other_id in found:
+                continue
+            if _same_quantum_leap_product(source_name, str(data.get("name") or "")):
+                found[other_id] = data
+    except Exception:
+        log.exception("quantum leap product search failed product=%s", product_id)
+    return list(found.values())
+
+
 def _highest_price_cents(product_id: str, currency: str) -> int | None:
-    """Highest active price on a Stripe product, in minor units."""
+    """Highest fixed one-time price among Quantum Leap products that share a name.
+
+    The payment often uses the customer-chosen product. The programme price is the
+    one-time product with the same name.
+    """
     if not product_id:
         return None
     secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
     if not secret:
         return None
     stripe.api_key = secret
-    kwargs = {"product": product_id, "active": True, "limit": 100}
-    if currency:
-        kwargs["currency"] = currency.lower()
     highest = None
-    for price in stripe.Price.list(**kwargs).auto_paging_iter():
-        cents = _programme_price_cents(price)
-        if cents is None:
+    chosen_product = ""
+    for product in _ql_product_candidates(product_id):
+        other_id = str(_as_dict(product).get("id") or "")
+        if not other_id:
             continue
-        if highest is None or cents > highest:
-            highest = cents
+        kwargs = {"product": other_id, "active": True, "limit": 100}
+        if currency:
+            kwargs["currency"] = currency.lower()
+        for price in stripe.Price.list(**kwargs).auto_paging_iter():
+            cents = _fixed_onetime_cents(price)
+            if cents is None:
+                continue
+            if highest is None or cents > highest:
+                highest = cents
+                chosen_product = other_id
+    if highest:
+        log.info(
+            "quantum leap price %s cents from product=%s for payment product=%s",
+            highest,
+            chosen_product,
+            product_id,
+        )
     return highest
 
 
@@ -165,7 +242,7 @@ def _use_highest_ql_price(
     preset: int | None,
     price_cents: int | None,
 ) -> tuple[int | None, int | None]:
-    """Quantum Leap has a lower price and a higher one. The sheet uses the higher one."""
+    """Quantum Leap uses the highest fixed one-time price, not the customer-chosen price."""
     if not is_quantum_leap(programme):
         return preset, price_cents
     highest = _highest_price_cents(product_id, currency)
