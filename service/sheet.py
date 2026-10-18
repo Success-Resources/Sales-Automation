@@ -49,7 +49,7 @@ SUMMARY_TAB = "Sales summary"
 ROTTERDAM_TAB = "MMI2610ROT"
 _SUMMARY_HEADERS = [
     "",
-    "selling price",
+    "Selling price",
     "Number of sales",
     "Revenue",
     "On-site collection",
@@ -438,6 +438,23 @@ def _paint(sheet_id: int, height: int, blocks: list[tuple[int, int, str, str]]) 
                 }
             }
         )
+        if end > start + 2:
+            for column in (_PRICE, _REMAINING, _PAID):
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": start + 2,
+                                "endRowIndex": end,
+                                "startColumnIndex": column,
+                                "endColumnIndex": column + 1,
+                            },
+                            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                            "fields": "userEnteredFormat.horizontalAlignment",
+                        }
+                    }
+                )
     return requests
 
 
@@ -621,19 +638,32 @@ def _normalize_payment(row: list[str]) -> None:
         row[_REMAINING] = amount_major(0, currency)
         if not row[_PRICE].strip():
             row[_PRICE] = row[_PAID]
-        return
-    if row[_PRICE].strip():
-        return
-    paid = _money(row[_PAID])
-    remaining_text = row[_REMAINING].strip()
-    remaining = _money(remaining_text)
-    if paid is None or remaining is None:
-        return
-    # 1, 2, 3 is the old installment count, not a balance.
-    if "." not in remaining_text and "." in row[_PAID]:
-        return
-    total = paid + remaining
-    row[_PRICE] = f"{total:.2f}" if "." in row[_PAID] or "." in remaining_text else str(int(round(total)))
+    elif not row[_PRICE].strip():
+        paid = _money(row[_PAID])
+        remaining_text = row[_REMAINING].strip().replace(",", "")
+        remaining = _money(row[_REMAINING])
+        if paid is not None and remaining is not None:
+            # 1, 2, 3 is the old installment count, not a balance.
+            if not ("." not in remaining_text and "." in row[_PAID].replace(",", "")):
+                total = paid + remaining
+                row[_PRICE] = (
+                    f"{total:.2f}" if "." in row[_PAID] or "." in remaining_text else str(int(round(total)))
+                )
+    for index in (_PRICE, _REMAINING, _PAID):
+        row[index] = _group_digits(row[index])
+
+
+def _group_digits(value: str) -> str:
+    """Insert thousands commas. Leave text that is not a plain number unchanged."""
+    text = (value or "").strip().replace(",", "")
+    match = re.fullmatch(r"(-?)(\d+)(?:\.(\d+))?", text)
+    if not match:
+        return value
+    sign, whole, frac = match.groups()
+    grouped = f"{int(whole):,}"
+    if frac is not None:
+        grouped = f"{grouped}.{frac}"
+    return f"{sign}{grouped}"
 
 
 def _format_amount(amount: float, currency: str) -> str:
@@ -835,9 +865,9 @@ def summary_values(
         price = _selling_price(programme_rows)
         values.append(_summary_line(label, combined, currency, price))
         kinds.append("programme")
-        values.append(_summary_line("paid in full", full_metrics, currency, price))
+        values.append(_summary_line("Paid in full", full_metrics, currency, price))
         kinds.append("detail")
-        values.append(_summary_line("installment", installment_metrics, currency, price))
+        values.append(_summary_line("Installments", installment_metrics, currency, price))
         kinds.append("detail")
 
     if not total_currency:
@@ -845,13 +875,13 @@ def summary_values(
             total_currency = _summary_currency(rows)
             if total_currency:
                 break
-    values.append(_summary_line("total", total, total_currency))
+    values.append(_summary_line("Total", total, total_currency))
     kinds.append("total")
     if usd_known:
         usd_metrics = (total[0], usd_revenue, usd_onsite, usd_due)
-        values.append(_summary_line("total sales at event (USD)", usd_metrics, "USD", symbol="$"))
+        values.append(_summary_line("Total sales at event (USD)", usd_metrics, "USD", symbol="$"))
     else:
-        values.append(["total sales at event (USD)", "", f"{total[0]:,}", "", "", ""])
+        values.append(["Total sales at event (USD)", "", f"{total[0]:,}", "", "", ""])
     kinds.append("usd")
     return values, kinds
 
@@ -927,6 +957,22 @@ def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str], sta
         elif kind == "total":
             fill, font, size, align, bold = _TOTAL_FILL, _TOTAL_FONT, 10, "LEFT", True
         else:
+            if kind != "title":
+                requests.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": row_index,
+                                "endRowIndex": row_index + 1,
+                                "startColumnIndex": 1,
+                                "endColumnIndex": width,
+                            },
+                            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                            "fields": "userEnteredFormat.horizontalAlignment",
+                        }
+                    }
+                )
             continue
         requests.append(
             {
@@ -959,6 +1005,22 @@ def _paint_summary(sheet_id: int, values: list[list[str]], kinds: list[str], sta
                 }
             }
         )
+        if kind != "title":
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": width,
+                        },
+                        "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                        "fields": "userEnteredFormat.horizontalAlignment",
+                    }
+                }
+            )
     return requests
 
 
