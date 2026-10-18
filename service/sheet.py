@@ -31,6 +31,7 @@ HEADERS = [
     "Stripe product id",
     "Payment ID",
     "Status",
+    "transferred to Quantum Leap",
 ]
 _PROGRAMME = 1
 _PRICE = 2
@@ -42,7 +43,9 @@ _NAME = 7
 _EMAIL = 8
 _PAYMENT_ID = 12
 _STATUS = 13
+_TRANSFERRED = 14
 _COLUMNS = len(HEADERS)
+_LAST_COLUMN = chr(ord("A") + _COLUMNS - 1)
 _GAP = 3
 PLACEHOLDER_TAB = "SR Event Sales"
 SUMMARY_TAB = "Sales summary"
@@ -186,7 +189,7 @@ def _tab_row_count(tab: str) -> tuple[int, int]:
 
 
 def _values(tab: str) -> list[list[str]]:
-    target = urllib.parse.quote(f"'{tab}'!A:N", safe="")
+    target = urllib.parse.quote(f"'{tab}'!A:{_LAST_COLUMN}", safe="")
     result = _call("GET", _sheet_url(f"/values/{target}"))
     return result.get("values") or []
 
@@ -273,6 +276,57 @@ def _is_refunded(row: list[str]) -> bool:
     return row[_STATUS].strip().lower() == "refunded"
 
 
+def _is_transferred(row: list[str]) -> bool:
+    return len(row) > _TRANSFERRED and row[_TRANSFERRED].strip().casefold() == "yes"
+
+
+_QL_SECTION = next(index for index, section in enumerate(_SECTIONS) if section[2] == "ql")
+
+
+def _mark_ql_transfers(payments: list[list[str]]) -> None:
+    """Flag source-programme rows whose payer also has a Quantum Leap payment.
+
+    The payment id, amounts, and programme name stay as they are. The flag tells
+    the layout to show that row under Quantum Leap, next to the Quantum Leap payment.
+    """
+    quantum_leap = [
+        row
+        for row in payments
+        if not _is_refunded(row) and _matches_programme(row[_PROGRAMME], "quantumleap")
+    ]
+    for row in payments:
+        while len(row) <= _TRANSFERRED:
+            row.append("")
+        row[_TRANSFERRED] = ""
+        if _is_refunded(row) or not quantum_leap:
+            continue
+        if not any(_matches_programme(row[_PROGRAMME], keyword) for keyword in _UPGRADE_SOURCES):
+            continue
+        if (_money(row[_PAID]) or 0) <= 0.009:
+            continue
+        if any(_same_person(row, [existing]) for existing in quantum_leap):
+            row[_TRANSFERRED] = "Yes"
+
+
+def _pair_with_quantum_leap(rows: list[list[str]]) -> list[list[str]]:
+    """Put each transferred programme row immediately before that person's Quantum Leap row."""
+    native = [row for row in rows if not _is_transferred(row)]
+    moved = [row for row in rows if _is_transferred(row)]
+    if not moved:
+        return rows
+    used: set[int] = set()
+    ordered: list[list[str]] = []
+    for row in native:
+        for source in moved:
+            if id(source) in used or not _same_person(source, [row]):
+                continue
+            ordered.append(source)
+            used.add(id(source))
+        ordered.append(row)
+    ordered.extend(source for source in moved if id(source) not in used)
+    return ordered
+
+
 def _layout(payments: list[list[str]], include_tail: bool = True) -> tuple[list[list[str]], list[tuple[int, int, str, str]], list[list[str]], list[list[str]]]:
     grouped: list[list[list[str]]] = [[] for _ in _SECTIONS]
     refunded: list[list[str]] = []
@@ -281,11 +335,12 @@ def _layout(payments: list[list[str]], include_tail: bool = True) -> tuple[list[
         if _is_refunded(row):
             refunded.append(row)
             continue
-        section = _section_for(row[_PROGRAMME])
+        section = _QL_SECTION if _is_transferred(row) else _section_for(row[_PROGRAMME])
         if section is None:
             other.append(row)
         else:
             grouped[section].append(row)
+    grouped[_QL_SECTION] = _pair_with_quantum_leap(grouped[_QL_SECTION])
 
     sections = list(_SECTIONS)
     buckets = grouped
@@ -512,18 +567,21 @@ def organize_tab(tab: str, payments: list[list[str]] | None = None) -> None:
     sheet_id = _unmerge_tab(tab)
     if payments is None:
         payments = _payment_rows(_values(tab))
+    payments = [_pad(row) for row in payments]
     for row in payments:
         _normalize_payment(row)
+    _mark_ql_transfers(payments)
     values, blocks, refunded, other = _layout(payments, include_tail=tab != ROTTERDAM_TAB)
     extra_paint: list[dict] = []
     if tab == ROTTERDAM_TAB:
         _delete_summary_tab()
         currencies = {row[_CURRENCY].strip().upper() for row in payments if row[_CURRENCY].strip()}
-        summary_rows, kinds = summary_values({tab: payments}, _usd_per_unit(currencies))
+        reports = _programme_reports(payments)
+        summary_rows, kinds = _render_summary(reports, _usd_per_unit(currencies))
         summary_at = len(values) + _GAP
         values.extend(_pad([]) for _ in range(_GAP))
         values.extend(_pad(row) for row in summary_rows)
-        prelim_rows, prelim_kinds = preliminary_values(tab, payments)
+        prelim_rows, prelim_kinds = preliminary_values(tab, reports)
         prelim_at = len(values) + _GAP
         values.extend(_pad([]) for _ in range(_GAP))
         values.extend(prelim_rows)
@@ -772,14 +830,23 @@ def _people(rows: list[list[str]]) -> tuple[list[list[list[str]]], list[list[lis
     return paid_full, installment
 
 
-def _metrics(groups: list[list[list[str]]]) -> tuple[int, float, float, float]:
-    """Sales count, revenue, on-site collection, and amount still to collect."""
+def _metrics(
+    groups: list[list[list[str]]], credit_for: dict[int, float] | None = None
+) -> tuple[int, float, float, float]:
+    """Sales count, revenue, on-site collection, and amount still to collect.
+
+    Credit reduces what is still owed. It is not added to the amount paid.
+    """
+    credits = credit_for or {}
     revenue = 0.0
     onsite = 0.0
     due = 0.0
     for group in groups:
         paid = sum(_money(row[_PAID]) or 0 for row in group)
         owed = _owed(group)
+        credit = credits.get(id(group), 0.0)
+        if credit:
+            owed = max(0.0, owed - credit)
         price = max((_money(row[_PRICE]) or 0) for row in group)
         onsite += paid
         due += owed
@@ -834,18 +901,109 @@ def _matches_programme(programme: str, keyword: str) -> bool:
     return bool(key) and keyword in key
 
 
-def summary_values(
-    by_tab: dict[str, list[list[str]]], usd_per_unit: dict[str, float] | None = None
-) -> tuple[list[list[str]], list[str]]:
-    """Sales summary rows for one event. The caller leaves three blank rows above this table."""
-    rows_by_programme: dict[str, list[list[str]]] = {keyword: [] for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES}
-    for rows in by_tab.values():
-        for row in rows:
-            for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES:
-                if _matches_programme(row[_PROGRAMME], keyword):
-                    rows_by_programme[keyword].append(row)
-                    break
+# A later Quantum Leap purchase takes credit from these programmes.
+_UPGRADE_SOURCES = (
+    "neverworkagain",
+    "guerrillabusiness",
+    "trainthetrainer",
+    "enlightenedwarrior",
+)
 
+
+def _group_keys(group: list[list[str]]) -> tuple[set[str], set[str]]:
+    emails = {_person_text(row[_EMAIL]) for row in group if _person_text(row[_EMAIL])}
+    names = {_person_text(row[_NAME]) for row in group if _person_text(row[_NAME])}
+    return emails, names
+
+
+def _same_group(left: list[list[str]], right: list[list[str]]) -> bool:
+    """Same person when the email matches or the name matches. A blank matches nothing."""
+    left_emails, left_names = _group_keys(left)
+    right_emails, right_names = _group_keys(right)
+    if left_emails & right_emails:
+        return True
+    return bool(left_names & right_names)
+
+
+def _programme_reports(payments: list[list[str]]) -> list[dict]:
+    """Sales figures from the programme groups after Quantum Leap transfers.
+
+    Rows flagged as transferred sit in the Quantum Leap group, not in Never Work
+    Again, Guerrilla Business Intensive, Train the Trainer, or Enlightened Warrior
+    Camp. Their amount paid is credit toward Quantum Leap. The Quantum Leap amount
+    paid stays the cash paid on the Quantum Leap row.
+    """
+    rows_by_programme: dict[str, list[list[str]]] = {
+        keyword: [] for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES
+    }
+    transferred: list[list[str]] = []
+    for row in payments:
+        if _is_refunded(row):
+            continue
+        if _is_transferred(row):
+            transferred.append(row)
+            continue
+        for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES:
+            if _matches_programme(row[_PROGRAMME], keyword):
+                rows_by_programme[keyword].append(row)
+                break
+
+    split = {
+        keyword: _people(rows_by_programme[keyword])
+        for _label, keyword, _fill, _font in _SUMMARY_PROGRAMMES
+    }
+    ql_full, ql_installment = split["quantumleap"]
+    consumed: set[int] = set()
+    upgrade_groups: list[list[list[str]]] = []
+    upgrade_credits: dict[int, float] = {}
+    for group in ql_full + ql_installment:
+        credit = 0.0
+        for source in transferred:
+            if id(source) in consumed or not _same_group(group, [source]):
+                continue
+            paid = _money(source[_PAID]) or 0
+            if paid <= 0.009:
+                continue
+            credit += paid
+            consumed.add(id(source))
+        if credit > 0.009:
+            upgrade_groups.append(group)
+            upgrade_credits[id(group)] = credit
+
+    reports: list[dict] = []
+    for label, keyword, _fill, _font in _SUMMARY_PROGRAMMES:
+        programme_rows = rows_by_programme[keyword]
+        full, installment = split[keyword]
+        if keyword == "quantumleap":
+            full = [group for group in full if id(group) not in upgrade_credits]
+            installment = [group for group in installment if id(group) not in upgrade_credits]
+            upgrade = _metrics(upgrade_groups, upgrade_credits) if upgrade_groups else None
+        else:
+            upgrade = None
+        full_metrics = _metrics(full)
+        installment_metrics = _metrics(installment)
+        combined = _add_metrics(full_metrics, installment_metrics)
+        if upgrade is not None:
+            combined = _add_metrics(combined, upgrade)
+        reports.append(
+            {
+                "label": label,
+                "keyword": keyword,
+                "currency": _summary_currency(programme_rows),
+                "price": _selling_price(programme_rows),
+                "combined": combined,
+                "full": full_metrics,
+                "installment": installment_metrics,
+                "upgrade": upgrade,
+            }
+        )
+    return reports
+
+
+def _render_summary(
+    reports: list[dict], usd_per_unit: dict[str, float] | None = None
+) -> tuple[list[list[str]], list[str]]:
+    """Turn programme figures into the sales summary table."""
     values: list[list[str]] = [["Sales summary"] + [""] * (len(_SUMMARY_HEADERS) - 1)]
     kinds = ["title"]
     values.append(list(_SUMMARY_HEADERS))
@@ -858,13 +1016,9 @@ def summary_values(
     usd_due = 0.0
     usd_known = True
     rates = usd_per_unit or {}
-    for label, keyword, _fill, _font in _SUMMARY_PROGRAMMES:
-        programme_rows = rows_by_programme[keyword]
-        currency = _summary_currency(programme_rows)
-        paid_full, installment = _people(programme_rows)
-        full_metrics = _metrics(paid_full)
-        installment_metrics = _metrics(installment)
-        combined = _add_metrics(full_metrics, installment_metrics)
+    for report in reports:
+        currency = report["currency"]
+        combined = report["combined"]
         total = _add_metrics(total, combined)
         if combined[0] and not total_currency:
             total_currency = currency
@@ -877,18 +1031,21 @@ def summary_values(
             usd_revenue += combined[1] * rate
             usd_onsite += combined[2] * rate
             usd_due += combined[3] * rate
-        price = _selling_price(programme_rows)
-        values.append(_summary_line(label, combined, currency, price))
+        price = report["price"]
+        values.append(_summary_line(report["label"], combined, currency, price))
         kinds.append("programme")
-        values.append(_summary_line("Paid in full", full_metrics, currency, price))
+        values.append(_summary_line("Paid in full", report["full"], currency, price))
         kinds.append("detail")
-        values.append(_summary_line("Installments", installment_metrics, currency, price))
+        values.append(_summary_line("Installments", report["installment"], currency, price))
         kinds.append("detail")
+        if report["upgrade"] is not None:
+            values.append(_summary_line("Upgrade", report["upgrade"], currency, price))
+            kinds.append("detail")
 
     if not total_currency:
-        for rows in rows_by_programme.values():
-            total_currency = _summary_currency(rows)
-            if total_currency:
+        for report in reports:
+            if report["currency"]:
+                total_currency = report["currency"]
                 break
     values.append(_summary_line("Total", total, total_currency))
     kinds.append("total")
@@ -899,6 +1056,15 @@ def summary_values(
         values.append(["Total sales at event (USD)", "", f"{total[0]:,}", "", "", ""])
     kinds.append("usd")
     return values, kinds
+
+
+def summary_values(
+    by_tab: dict[str, list[list[str]]], usd_per_unit: dict[str, float] | None = None
+) -> tuple[list[list[str]], list[str]]:
+    """Sales summary rows for one event. The caller leaves three blank rows above this table."""
+    payments = [_pad(row) for rows in by_tab.values() for row in rows]
+    _mark_ql_transfers(payments)
+    return _render_summary(_programme_reports(payments), usd_per_unit)
 
 
 def _euro(amount: float, currency: str) -> str:
@@ -926,22 +1092,13 @@ def _prelim_line(label: str, metrics: tuple[int, float, float, float], currency:
     return _prelim_cells(label, f"{sales:,}", _euro(revenue, currency), _euro(onsite, currency), _euro(due, currency))
 
 
-def preliminary_values(tab: str, payments: list[list[str]]) -> tuple[list[list[str]], list[str]]:
-    """L2 preliminary report for one event. The caller leaves three blank rows above it.
+def preliminary_values(tab: str, reports: list[dict]) -> tuple[list[list[str]], list[str]]:
+    """L2 preliminary report copied from the sales summary figures.
 
-    Venue, attendance, and lead trainer are left blank: this sheet does not record them.
-    The report lists programme names with Full Payment and Installment only.
+    The caller leaves three blank rows above this table. Venue, attendance, and
+    lead trainer stay blank. This does not read payment rows itself.
     """
-    by_programme = {keyword: [] for _label, keyword in _PRELIM_PROGRAMMES}
-    for row in payments:
-        if is_speed_wealth(row[_PROGRAMME]):
-            continue
-        for _label, keyword in _PRELIM_PROGRAMMES:
-            if _matches_programme(row[_PROGRAMME], keyword):
-                by_programme[keyword].append(row)
-                break
-
-    currency = _summary_currency(payments) or "EUR"
+    by_keyword = {report["keyword"]: report for report in reports}
     zero = (0, 0.0, 0.0, 0.0)
     values: list[list[str]] = []
     kinds: list[str] = []
@@ -959,26 +1116,33 @@ def preliminary_values(tab: str, payments: list[list[str]]) -> tuple[list[list[s
 
     full_total = zero
     installment_total = zero
-    programme_total = zero
-    for label, keyword in _PRELIM_PROGRAMMES:
-        paid_full, installment = _people(by_programme[keyword])
-        full_metrics = _metrics(paid_full)
-        installment_metrics = _metrics(installment)
-        combined = _add_metrics(full_metrics, installment_metrics)
-        full_total = _add_metrics(full_total, full_metrics)
-        installment_total = _add_metrics(installment_total, installment_metrics)
-        programme_total = _add_metrics(programme_total, combined)
-        add(_prelim_line(label, combined, currency), "programme")
-        add(_prelim_line("Full Payment", full_metrics, currency), "detail")
-        add(_prelim_line("Installment", installment_metrics, currency), "detail")
-    add(_prelim_line("Grand Total", programme_total, currency), "grand")
+    upgrade_total = zero
+    total_currency = ""
+    for _label, keyword in _PRELIM_PROGRAMMES:
+        report = by_keyword[keyword]
+        currency = report["currency"] or "EUR"
+        if report["combined"][0] and not total_currency:
+            total_currency = currency
+        full_total = _add_metrics(full_total, report["full"])
+        installment_total = _add_metrics(installment_total, report["installment"])
+        add(_prelim_line(report["label"], report["combined"], currency), "programme")
+        add(_prelim_line("Full Payment", report["full"], currency), "detail")
+        add(_prelim_line("Installment", report["installment"], currency), "detail")
+        if report["upgrade"] is not None:
+            upgrade_total = _add_metrics(upgrade_total, report["upgrade"])
+            add(_prelim_line("Upgrade", report["upgrade"], currency), "detail")
+    if not total_currency:
+        total_currency = "EUR"
+    programme_total = _add_metrics(_add_metrics(full_total, installment_total), upgrade_total)
+    add(_prelim_line("Grand Total", programme_total, total_currency), "grand")
     add(_pad([""]), "separator")
     add(_prelim_cells("Summary", "Total Quantity", "Total Amount", "Total Paid", "Total Balance"), "header")
-    add(_prelim_line("Full Payment", full_total, currency), "detail")
-    add(_prelim_line("Installment", installment_total, currency), "detail")
-    confirmed = _add_metrics(full_total, installment_total)
-    add(_prelim_line("Confirmed Sales", confirmed, currency), "confirmed")
-    add(_prelim_line("Total Sales", confirmed, currency), "total")
+    add(_prelim_line("Full Payment", full_total, total_currency), "detail")
+    add(_prelim_line("Installment", installment_total, total_currency), "detail")
+    if upgrade_total[0]:
+        add(_prelim_line("Upgrade", upgrade_total, total_currency), "detail")
+    add(_prelim_line("Confirmed Sales", programme_total, total_currency), "confirmed")
+    add(_prelim_line("Total Sales", programme_total, total_currency), "total")
     return values, kinds
 
 
