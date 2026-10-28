@@ -51,6 +51,10 @@ _GAP = 3
 PLACEHOLDER_TAB = "SR Event Sales"
 SUMMARY_TAB = "Sales summary"
 ROTTERDAM_TAB = "MMI2610ROT"
+ROME_TAB = "MMI2612ROM"
+REMINDER_PREFIX = "Reminders "
+LEGACY_REMINDER_TAB = "Reminders"
+REMINDER_HEADERS = ["Key", "Tab", "Email", "Programme", "Outstanding", "Sent at", "Status"]
 _SUMMARY_HEADERS = [
     "",
     "Selling price",
@@ -78,7 +82,7 @@ _PRELIM_PROGRAMMES = (
     ("Never Work Again", "neverworkagain"),
 )
 _PRELIM_END = 7
-_SKIP_TABS = {PLACEHOLDER_TAB, "Reminders", SUMMARY_TAB}
+_SKIP_TABS = {PLACEHOLDER_TAB, LEGACY_REMINDER_TAB, SUMMARY_TAB}
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # title, keyword, exact short name, fill, font
@@ -598,6 +602,79 @@ def _ensure_tab_exists(tab: str) -> None:
     _batch([{"addSheet": {"properties": {"title": tab}}}])
 
 
+def is_reminder_tab(name: str) -> bool:
+    return name == LEGACY_REMINDER_TAB or name.startswith(REMINDER_PREFIX)
+
+
+def reminder_tab_name(event: str) -> str:
+    return f"{REMINDER_PREFIX}{event}"
+
+
+def _ordered_sheets() -> list[dict]:
+    meta = _call("GET", _sheet_url("?fields=sheets(properties(title,index,sheetId))"))
+    sheets = [item["properties"] for item in meta.get("sheets") or []]
+    sheets.sort(key=lambda props: props.get("index", 0))
+    return sheets
+
+
+def _place_sheet_after(anchor: str, tab: str) -> None:
+    """Put tab immediately to the right of anchor."""
+    sheets = _ordered_sheets()
+    titles = [sheet["title"] for sheet in sheets]
+    if anchor not in titles or tab not in titles:
+        return
+    without = [sheet for sheet in sheets if sheet["title"] != tab]
+    anchor_at = next(index for index, sheet in enumerate(without) if sheet["title"] == anchor)
+    target = anchor_at + 1
+    current = next(sheet for sheet in sheets if sheet["title"] == tab)
+    if current.get("index") == target:
+        return
+    _batch(
+        [
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": current["sheetId"], "index": target},
+                    "fields": "index",
+                }
+            }
+        ]
+    )
+
+
+def ensure_reminder_tab(event: str) -> str:
+    """One reminder log beside the event tab. The Rotterdam log keeps its existing rows."""
+    name = reminder_tab_name(event)
+    titles = _tabs()
+    if name not in titles and event == ROTTERDAM_TAB and LEGACY_REMINDER_TAB in titles:
+        _batch(
+            [
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": titles[LEGACY_REMINDER_TAB], "title": name},
+                        "fields": "title",
+                    }
+                }
+            ]
+        )
+    elif name not in titles:
+        _batch([{"addSheet": {"properties": {"title": name}}}])
+    if not _values(name):
+        append_rows(name, [list(REMINDER_HEADERS)])
+    _place_sheet_after(event, name)
+    return name
+
+
+def arrange_event_reminders() -> None:
+    """Event tab, then that event's reminder log, for every event including Rome."""
+    if not configured():
+        return
+    _ensure_tab_exists(ROME_TAB)
+    if not _values(ROME_TAB):
+        organize_tab(ROME_TAB)
+    for tab in list(sales_tabs()):
+        ensure_reminder_tab(tab)
+
+
 def _unmerge_tab(tab: str) -> int:
     """Drop every merged title before writing. A stale merge keeps only column A."""
     sheet_id, rows = _tab_row_count(tab)
@@ -677,7 +754,7 @@ def ensure_log_tab(tab: str) -> None:
 
 
 def sales_tabs() -> list[str]:
-    return [name for name in _tabs() if name not in _SKIP_TABS]
+    return [name for name in _tabs() if name not in _SKIP_TABS and not is_reminder_tab(name)]
 
 
 def read_payments(tab: str) -> list[list[str]]:
@@ -707,6 +784,7 @@ def _duplicate(payments: list[list[str]], row: list[str]) -> bool:
 def record_payment(tab: str, row: list[str], subscription_id: str = "") -> str:
     """Insert a payment into its programme block. Return written or duplicate."""
     _ensure_tab_exists(tab)
+    ensure_reminder_tab(tab)
     payments = _payment_rows(_values(tab))
     row = _pad(row)
     if _duplicate(payments, row):
@@ -1232,6 +1310,7 @@ def refresh_summary() -> None:
     """Put the Sales summary on the Rotterdam tab and remove the separate tab."""
     if not configured():
         return
+    arrange_event_reminders()
     _delete_summary_tab()
     if ROTTERDAM_TAB not in _tabs():
         return

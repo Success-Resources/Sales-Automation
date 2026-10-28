@@ -2,6 +2,8 @@
 
 MMI2609MAD | Quantum Leap 2027
 MMI2610ROT | Never Work Again 2027
+MMI2611BIR | Speed Wealth Book
+MMI2612ROM | Speed Wealth Book
 """
 
 from __future__ import annotations

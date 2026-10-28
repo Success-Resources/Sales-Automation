@@ -19,7 +19,7 @@ from sheet import (
     _REMAINING,
     _STATUS,
     append_rows,
-    ensure_log_tab,
+    ensure_reminder_tab,
     is_speed_wealth,
     paid_at,
     read_log,
@@ -31,7 +31,6 @@ log = logging.getLogger("sales.reminders")
 _missing_gmail_logged = False
 _disabled_logged = False
 
-_LOG_TAB = "Reminders"
 _TRACKING = "__tracking_since__"
 _NAME = 7
 
@@ -172,25 +171,23 @@ def send_due() -> int:
             log.info("reminder skipped, GMAIL_ADDRESS or GMAIL_APP_PASSWORD is not set")
             _missing_gmail_logged = True
         return 0
-    ensure_log_tab(_LOG_TAB)
-    log_rows = read_log(_LOG_TAB)
-    if not log_rows:
-        log_rows = [["Key", "Tab", "Email", "Programme", "Outstanding", "Sent at", "Status"]]
-        append_rows(_LOG_TAB, log_rows)
-    started = _tracking_since(log_rows)
-    if started is None:
-        started = datetime.now(timezone.utc)
-        append_rows(
-            _LOG_TAB,
-            [[_TRACKING, "", "", "", "", paid_at(int(started.timestamp())), "tracking"]],
-        )
-        log.info("reminder tracking starts at %s", paid_at(int(started.timestamp())))
-    sent = _sent_keys(log_rows)
     now = datetime.now(timezone.utc)
     count = 0
     for tab in sales_tabs():
-        if tab == _LOG_TAB:
-            continue
+        log_name = ensure_reminder_tab(tab)
+        log_rows = read_log(log_name)
+        if not log_rows:
+            log_rows = [["Key", "Tab", "Email", "Programme", "Outstanding", "Sent at", "Status"]]
+            append_rows(log_name, log_rows)
+        started = _tracking_since(log_rows)
+        if started is None:
+            started = now
+            append_rows(
+                log_name,
+                [[_TRACKING, "", "", "", "", paid_at(int(started.timestamp())), "tracking"]],
+            )
+            log.info("reminder tracking starts at %s for %s", paid_at(int(started.timestamp())), tab)
+        sent = _sent_keys(log_rows)
         for balance in due_balances(open_balances(tab, read_payments(tab)), sent, started, now, wait_minutes()):
             mail.send_outstanding(
                 to=balance["email"],
@@ -200,7 +197,7 @@ def send_due() -> int:
                 currency=balance["currency"],
             )
             append_rows(
-                _LOG_TAB,
+                log_name,
                 [[
                     balance["key"],
                     balance["tab"],
